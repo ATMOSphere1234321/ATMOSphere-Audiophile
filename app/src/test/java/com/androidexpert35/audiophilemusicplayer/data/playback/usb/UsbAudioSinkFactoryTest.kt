@@ -10,6 +10,7 @@ import org.junit.Test
 class UsbAudioSinkFactoryTest {
 
     private val factory = UsbAudioSinkFactory(
+        prefs = mockk(relaxed = true),
         context = mockk<Context>(relaxed = true),
         usbDeviceScanner = mockk<UsbDeviceScanner>(relaxed = true),
         usbManager = mockk<UsbManager>(relaxed = true),

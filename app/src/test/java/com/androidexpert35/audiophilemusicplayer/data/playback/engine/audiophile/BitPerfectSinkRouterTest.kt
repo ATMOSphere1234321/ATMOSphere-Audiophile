@@ -28,6 +28,7 @@ class BitPerfectSinkRouterTest {
 
     @Before
     fun setUpAndroidLog() {
+        every { usbAudioSinkFactory.usesAndroidUsbAudio() } returns false
         mockkStatic(android.util.Log::class)
         every { android.util.Log.i(any(), any()) } returns 0
     }

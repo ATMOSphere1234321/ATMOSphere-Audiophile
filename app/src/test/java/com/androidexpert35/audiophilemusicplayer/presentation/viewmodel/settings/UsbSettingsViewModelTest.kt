@@ -13,6 +13,7 @@ import com.androidexpert35.audiophilemusicplayer.domain.model.audio.OutputStream
 import com.androidexpert35.audiophilemusicplayer.domain.model.audio.SueStatus
 import com.androidexpert35.audiophilemusicplayer.domain.model.audio.UsbAudioStatus
 import com.androidexpert35.audiophilemusicplayer.domain.model.common.PlaybackResourceError
+import com.androidexpert35.audiophilemusicplayer.domain.repository.SettingsRepository
 import com.androidexpert35.audiophilemusicplayer.domain.usecase.ObserveAudioTelemetryUseCase
 import com.androidexpert35.audiophilemusicplayer.domain.usecase.ObserveUsbAudioStatusUseCase
 import com.androidexpert35.audiophilemusicplayer.domain.usecase.RefreshUsbAudioDevicesUseCase
@@ -44,6 +45,7 @@ class UsbSettingsViewModelTest {
     private val observeAudioTelemetryUseCase = mockk<ObserveAudioTelemetryUseCase>()
     private val refreshUsbAudioDevicesUseCase = mockk<RefreshUsbAudioDevicesUseCase>()
     private val requestUsbAudioPermissionUseCase = mockk<RequestUsbAudioPermissionUseCase>()
+    private val settingsRepository = mockk<SettingsRepository>()
     private val navigationManager = FakeNavigationManager()
 
     private val usbAudioStatusFlow = MutableStateFlow(UsbAudioStatus())
@@ -215,11 +217,14 @@ class UsbSettingsViewModelTest {
     }
 
     private fun stubObservationUseCases() {
+        every { settingsRepository.observeAndroidUsbAudioEnabled() } returns MutableStateFlow(true)
+        every { settingsRepository.observeAndroidUsbBitPerfectEnabled() } returns MutableStateFlow(true)
         every { observeUsbAudioStatusUseCase.invoke() } returns usbAudioStatusFlow
         every { observeAudioTelemetryUseCase.invoke() } returns telemetryFlow
     }
 
     private fun createViewModel(): UsbSettingsViewModel = UsbSettingsViewModel(
+        settingsRepository = settingsRepository,
         observeUsbAudioStatusUseCase = observeUsbAudioStatusUseCase,
         observeAudioTelemetryUseCase = observeAudioTelemetryUseCase,
         refreshUsbAudioDevicesUseCase = refreshUsbAudioDevicesUseCase,
