@@ -407,7 +407,8 @@ void DecoderToRingBridge::pump_loop() noexcept
     //      No conversion; passthrough at 4 bytes/sample × channels.
     //
     //  • float32 / native S32 (bytes_per_sample=4):
-    //      Already 4 bytes/sample.  Passthrough.
+    //      Both occupy four bytes, but their encodings differ. Float is converted
+    //      numerically by PcmWireFormatter; S32 keeps the exact integer path.
     //
     // In all non-DSD cases wire_bpf = channel_count × 4 (32-bit subslot).
     const bool needs_s16_expansion =
@@ -810,15 +811,12 @@ void DecoderToRingBridge::pump_loop() noexcept
             }
 
         } else {
-            const auto encoding = fmt.bytes_per_sample == 2
-                ? PcmSourceEncoding::S16Le
-                : PcmSourceEncoding::S32Le;
             const double gain = static_cast<double>(
                     volume_scalar_.load(std::memory_order_relaxed));
-            const auto formatted = pcm_formatter_.format(
+            const auto formatted = pcm_formatter_.format_android_pcm(
                     chunk.data(),
                     static_cast<std::size_t>(decode_ret),
-                    encoding,
+                    fmt.android_pcm_encoding,
                     gain,
                     expanded_chunk.data(),
                     expanded_chunk.size());

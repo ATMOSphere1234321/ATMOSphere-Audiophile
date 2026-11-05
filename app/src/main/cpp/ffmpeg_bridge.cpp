@@ -60,6 +60,7 @@
 
 #include "cpu_affinity_policy.h"    // DecodeLoad + audio-thread pinning
 #include "fd_trampoline_path.h"     // /proc/self/fd/<n> recogniser for content:// URIs
+#include "pcm_output_format.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -395,58 +396,13 @@ static void reset_fd_io(Session *s) {
 static bool choose_output_format(const AVCodecContext *codec_ctx,
                                  AVSampleFormat *out_fmt,
                                  int *out_android_encoding) {
-    AVSampleFormat native = codec_ctx->sample_fmt;
-    AVSampleFormat packed = av_get_packed_sample_fmt(native);
-
-    // Prefer the codec's own advertised bit depth (set for lossless decoders:
-    // FLAC, ALAC, PCM). For lossy decoders (MP3, AAC, Vorbis) this is typically
-    // 0 — we derive a conservative depth from the sample format instead.
-    int src_bits = codec_ctx->bits_per_raw_sample;
-
-    if (src_bits <= 0) {
-        switch (packed) {
-            case AV_SAMPLE_FMT_U8:
-                src_bits = 8;
-                break;
-            case AV_SAMPLE_FMT_S16:
-                src_bits = 16;
-                break;
-            case AV_SAMPLE_FMT_S32:
-                // S32P is used by some lossless decoders for 24-bit sources even
-                // when bits_per_raw_sample is absent — treat conservatively as 24.
-                src_bits = 24;
-                break;
-            case AV_SAMPLE_FMT_FLT:
-            case AV_SAMPLE_FMT_DBL:
-                // Lossy decoders (MP3, AAC, Vorbis) always decode to FLTP.
-                // Their quality ceiling is 16-bit; output S16 to save CPU/battery.
-                src_bits = 16;
-                break;
-            default:
-                return false;
-        }
-    }
-
-    if (src_bits <= 16) {
-        // Standard CD-quality and all lossy compressed formats.
-        *out_fmt             = AV_SAMPLE_FMT_S16;
-        *out_android_encoding = ENCODING_PCM_16BIT;
-    } else if (src_bits <= 24) {
-        // High-resolution lossless (24-bit FLAC, ALAC, DSD-PCM).
-        // Carried as zero-padded S32 — the only alignment-safe Android path.
-        *out_fmt             = AV_SAMPLE_FMT_S32;
-        *out_android_encoding = ENCODING_PCM_32BIT;
-    } else {
-        // 32-bit sources: keep integer as S32, float as FLT.
-        if (packed == AV_SAMPLE_FMT_FLT || packed == AV_SAMPLE_FMT_DBL) {
-            *out_fmt             = AV_SAMPLE_FMT_FLT;
-            *out_android_encoding = ENCODING_PCM_FLOAT;
-        } else {
-            *out_fmt             = AV_SAMPLE_FMT_S32;
-            *out_android_encoding = ENCODING_PCM_32BIT;
-        }
-    }
-    return true;
+    const auto selected = choose_pcm_output_format(
+            codec_ctx->codec_id,
+            av_get_packed_sample_fmt(codec_ctx->sample_fmt),
+            codec_ctx->bits_per_raw_sample);
+    *out_fmt = selected.sample_format;
+    *out_android_encoding = selected.android_encoding;
+    return selected.sample_format != AV_SAMPLE_FMT_NONE;
 }
 
 static int bytes_per_sample_for(AVSampleFormat fmt) {
@@ -1277,12 +1233,12 @@ FfmpegSession *ffmpeg_session_open(
 
     if (!s->is_dsd && !forced_pcm_from_dsd) {
         if (s->codec_ctx->bits_per_raw_sample > 0) {
-            // Lossless decoders (FLAC, ALAC, PCM WAV) always populate this.
+            // Prefer an explicitly reported raw source depth when available.
             s->source_bit_depth = s->codec_ctx->bits_per_raw_sample;
         } else if (s->out_android_encoding == ENCODING_PCM_16BIT) {
             // Lossy codecs (MP3, AAC, Vorbis, Opus) decode to AV_SAMPLE_FMT_FLTP
-            // internally, but their quality ceiling is 16-bit — choose_output_format
-            // already mapped them to AV_SAMPLE_FMT_S16 / ENCODING_PCM_16BIT.
+            // internally; the existing compressed-codec output policy has selected
+            // AV_SAMPLE_FMT_S16 / ENCODING_PCM_16BIT in choose_output_format.
             // Deriving source_bit_depth from bytes_per_sample_for(FLTP)*8 = 32 here
             // would incorrectly report 32-bit depth and disable the S16→S32 MSB
             // expansion in the USB pump, causing 2× speed playback (chipmunk effect).
@@ -1293,8 +1249,8 @@ FfmpegSession *ffmpeg_session_open(
                 "Normalized format to S16: %d bytes per frame (lossy codec FLTP→S16 via SwrContext)",
                 av_get_bytes_per_sample(AV_SAMPLE_FMT_S16) * s->out_channels);
         } else {
-            // Non-lossy but bits_per_raw_sample absent (uncommon): derive from output
-            // sample format width.  This covers edge cases like unsigned 8-bit PCM.
+            // Raw depth may be absent for explicit floating PCM. Report the
+            // selected carrier width (F32 is32 bits); F64-to-F32 remains lossy.
             s->source_bit_depth = bytes_per_sample_for(s->out_sample_fmt) * 8;
         }
     }

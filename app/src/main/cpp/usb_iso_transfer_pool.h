@@ -1,3 +1,4 @@
+// Cadence note: legacy "uframe" names refer to the selected ISO service interval.
 // ─────────────────────────────────────────────────────────────────────────────
 // usb_iso_transfer_pool.h
 //
@@ -8,49 +9,25 @@
 // and silenced at construction; no USB transaction is initiated until Step 5
 // calls libusb_submit_transfer() on each slot in the ring.
 //
-// ── USB High-Speed isochronous microframe arithmetic ────────────────────────
+// ── Endpoint service-interval arithmetic ─────────────────────────────────────
 //
-// USB 2.0 High-Speed divides time into 125 µs "microframes":
-//   8 microframes per 1 ms frame × 8000 frames/sec = 8000 µframes/sec
+// ISO bInterval describes 2^(bInterval-1) USB ticks per packet. A tick is
+// 1 ms at full speed, and 125 us at high/super speed. Therefore:
+//   max_packet_bytes = ceil(sample_rate * interval_ticks / tick_hz) * frame_bytes
+//   phase += uint64_t(sample_rate) * interval_ticks
+//   packet_frames = phase / tick_hz; phase %= tick_hz
+// This schedules whole frames at the nominal rate without rounding packet Hz.
 //
-// Audio data rate at sample_rate_hz with bytes_per_audio_frame bytes/sample:
-//   bytes_per_sec = sample_rate_hz × bytes_per_audio_frame
-//   bytes_per_uframe_exact = bytes_per_sec / 8000
+// Example, 96 kHz stereo S32: HS interval1 carries12frames/96bytes every125us;
+// interval3 carries48frames/384bytes every500us. Sending96bytes at interval3
+// would drain only one quarter of the required audio. Fractional rates use
+// floor/ceiling frame counts with one accumulator spanning all transfers.
 //
-// Because some sample rates (e.g., 44.1 kHz, 88.2 kHz, 352.8 kHz) are not
-// evenly divisible by 8000, bytes_per_uframe is fractional.  The standard
-// approach is ceiling-division: allocate the maximum possible bytes per packet
-// and let the hardware (or a feedback endpoint in Step 5) regulate the actual
-// count.  This wastes ≤ 1 sample per microframe but never under-allocates.
-//
-//   bytes_per_uframe_ceil = ceil(sample_rate_hz / 8000) × bytes_per_audio_frame
-//
-// Reference calculations for common sample rates / 32-bit stereo (8 B/frame):
-//   44 100 Hz → ceil(5.5125)  ×8 =  6×8 =  48 B/µframe
-//   48 000 Hz → ceil(6.0)     ×8 =  6×8 =  48 B/µframe
-//   88 200 Hz → ceil(11.025)  ×8 = 12×8 =  96 B/µframe
-//   96 000 Hz → ceil(12.0)    ×8 = 12×8 =  96 B/µframe
-//  176 400 Hz → ceil(22.05)   ×8 = 23×8 = 184 B/µframe
-//  192 000 Hz → ceil(24.0)    ×8 = 24×8 = 192 B/µframe  ← design target
-//  352 800 Hz → ceil(44.1)    ×8 = 45×8 = 360 B/µframe  (DSD64 DoP)
-//  384 000 Hz → ceil(48.0)    ×8 = 48×8 = 384 B/µframe
-//
-// Buffer sizes at 8 packets/transfer:
-//   192 000 Hz → 192 B/µframe × 8 packets = 1 536 B/transfer
-//   384 000 Hz → 384 B/µframe × 8 packets = 3 072 B/transfer  (HS max packet!)
-//
-// ── Pool sizing rationale ────────────────────────────────────────────────────
-//
-// N transfers × P packets/transfer = N×P microframes of buffered audio.
-//
-// With N=16, P=8:
-//   16 × 8 = 128 µframes = 16 ms of pre-allocated audio in the ring.
-//   At 192 kHz this holds 16 × 1536 = 24 576 bytes ≈ 24 KB.
-//
-// 16 ms provides adequate safety margin against CPU scheduling jitter on
-// Android (SCHED_FIFO audio threads have ≤ 5 ms worst-case latency).
-// Increasing to N=32 doubles buffer RAM and latency but reduces dropout risk
-// on devices with poor USB host controller scheduling.
+// N transfers * P packets span N*P*interval_ticks/tick_hz seconds. At HS,
+// N=16/P=8 buffers16ms for interval1 and64ms for interval3. Pool counts are
+// unchanged; capacity and consumption both follow the selected endpoint.
+// HS transaction bits and SS companion wBytesPerInterval bound packet payloads.
+// Legacy API names containing "uframe" now mean one endpoint service interval.
 //
 // ── Memory alignment ─────────────────────────────────────────────────────────
 //
@@ -82,6 +59,7 @@
 #include <vector>
 
 #include "dsd_wire_mode.h"   // kPcmSilenceByte / kNativeDsdSilenceByte
+#include "usb_iso_cadence.h"
 
 // Forward declarations — the pool holds raw pointers but doesn't expose
 // libusb internals to callers above the data layer.
@@ -108,21 +86,27 @@ class SpscRingBuffer;
  * @property bytes_per_audio_frame   Bytes per interleaved audio sample-frame
  *                                   (channels × bytes_per_sample, e.g., 8 for
  *                                   stereo 32-bit).
+ * @property device_speed            Actual libusb bus speed from the descriptor scanner.
+ * @property endpoint_interval       Selected endpoint bInterval (1..16).
+ * @property endpoint_capacity_bytes Maximum bytes in one service interval, including SS companion data.
  * @property endpoint_address        USB isochronous OUT endpoint address from
  *                                   the Step 2 descriptor scanner.
  * @property pool_size               Number of transfer slots in the ring (N).
  *                                   Typical values: 8 (low-latency), 16
  *                                   (balanced), 32 (dropout-resistant).
  * @property packets_per_transfer    ISO packets per libusb_transfer struct (P).
- *                                   Each packet is one 125 µs USB microframe
+ *                                   Each packet is one endpoint service interval
  *                                   worth of audio.  Typical: 8 (1 ms/transfer).
  */
 struct IsoTransferPoolConfig {
     uint32_t sample_rate_hz          = 192'000;
     uint32_t bytes_per_audio_frame   = 8;      ///< e.g., 2ch × 4 bytes = 8
     uint8_t  endpoint_address        = 0;
+    int      device_speed            = LIBUSB_SPEED_UNKNOWN; ///< Actual negotiated bus speed.
+    uint8_t  endpoint_interval       = 0; ///< Selected ISO endpoint's bInterval, never guessed.
+    uint32_t endpoint_capacity_bytes = 0; ///< Descriptor capacity per service interval.
     uint32_t pool_size               = 16;     ///< N — number of transfer slots
-    uint32_t packets_per_transfer    = 8;      ///< P — microframes per transfer
+    uint32_t packets_per_transfer    = 8;      ///< P — service intervals per transfer
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -327,12 +311,12 @@ public:
     [[nodiscard]] const IsoTransferPoolConfig &config() const noexcept { return cfg_; }
 
     /**
-     * Bytes per USB microframe (125 µs), ceiling-rounded for fractional rates.
+     * Capacity per endpoint service interval, ceiling-rounded for fractional rates.
      *
      * This is the configured `iso_packet_desc[i].length` on every packet of
      * every transfer in the pool.
      *
-     * @return  Bytes per micro-frame = ceil(sample_rate / 8000) × bytes_per_frame.
+     * @return  Bytes per micro-frame = ceil(sample_rate * interval_ticks / base_ticks_per_second) × bytes_per_frame.
      */
     [[nodiscard]] uint32_t bytes_per_uframe()        const noexcept { return bytes_per_uframe_; }
 
@@ -444,25 +428,12 @@ public:
 
     // ── Bresenham fractional-rate packet sizing ────────────────────────────────
     //
-    // USB High-Speed delivers exactly 8000 microframes per second.  For sample
-    // rates that are NOT integer multiples of 8000 (44.1, 88.2, 176.4, 352.8 kHz
-    // and DSD64/DSD128 byte rates), the ideal samples-per-µframe is fractional.
-    //
-    // The naive ceiling approach allocates ceil(sr/8000) samples per every µframe,
-    // which over-delivers data:
-    //   44 100 Hz × 8 B/frame → ideal 352 800 B/s
-    //   Ceiling: ceil(5.5125) = 6 → 6 × 8000 × 8 = 384 000 B/s  (+8.8% ≡ pitch shift)
-    //
-    // The Bresenham (integer-DDA) accumulator distributes floor/ceil packet sizes
-    // so the long-term average exactly matches the nominal sample rate:
-    //   accumulator += sample_rate_hz          (add nominal rate each µframe)
-    //   frames_this_µframe = acc / 8000        (integer floor)
-    //   acc %= 8000                            (carry fractional remainder forward)
-    //   bytes_this_µframe = frames × bpf
-    //
-    // Over any multiple of (8000 / gcd(sr, 8000)) consecutive µframes the
-    // total byte count equals exactly sample_rate_hz × bytes_per_audio_frame /
-    // 8000 per µframe — no pitch shift, no buffer overflow.
+    // ISO bInterval is exponential at full/high/super speed. One packet spans
+    // interval_ticks of 1 ms (FS) or 125 us (HS/SS), so the exact schedule is:
+    //   phase += uint64_t(sample_rate_hz) * interval_ticks;
+    //   frames = phase / base_ticks_per_second; phase %= base_ticks_per_second;
+    // A 64-bit numerator preserves slow intervals without truncating packet Hz.
+    // Legacy public names containing "uframe" mean one service interval here.
 
     /**
      * Compute per-packet byte counts for the next transfer using the Bresenham
@@ -473,7 +444,7 @@ public:
      * thread, before any submissions).  Both call sites are serialised — no
      * concurrent access to `fractional_accumulator_` is possible.
      *
-     * The maximum bytes for any single packet is `ceil(sample_rate / 8000) ×
+     * The maximum bytes for any single packet is `ceil(sample_rate * interval_ticks / base_ticks_per_second) ×
      * bytes_per_audio_frame = bytes_per_uframe_`, which is ≤ the allocated
      * `buffer_size_per_xfer_ / packets_per_transfer`.  No buffer overflow can occur.
      *
@@ -684,17 +655,18 @@ private:
     void release_all() noexcept;
 
     IsoTransferPoolConfig              cfg_;
+    UsbIsoCadence                      cadence_;
     uint32_t                           bytes_per_uframe_     = 0;
     uint32_t                           buffer_size_per_xfer_ = 0;
 
     /// Bresenham phase accumulator for fractional-sample-rate packet sizing.
     ///
-    /// Holds the running fractional remainder (always in [0, USB_HS_UFRAMES_PER_SEC))
+    /// Holds the running fractional remainder (always in [0, cadence_.base_ticks_per_second))
     /// across all microframe packets submitted by this pool.  Modified exclusively by
     /// compute_next_transfer_lengths(), which is called only from allocate() (before any
     /// submission) and from iso_transfer_callback (on the single libusb event thread).
     /// No atomic needed — both call sites are serialised.
-    uint32_t                           fractional_accumulator_ = 0U;
+    uint64_t                           fractional_accumulator_ = 0U;
 
     /// libusb_transfer* ring — one entry per pool slot.
     std::vector<libusb_transfer *>     transfers_;
@@ -817,4 +789,3 @@ private:
  *                  non-null `TransferSlot*` set during pool construction.
  */
 void iso_transfer_callback(libusb_transfer *transfer);
-

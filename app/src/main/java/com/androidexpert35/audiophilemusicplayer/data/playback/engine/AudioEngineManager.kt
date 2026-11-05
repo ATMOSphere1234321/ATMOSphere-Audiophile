@@ -6,7 +6,6 @@ import com.androidexpert35.audiophilemusicplayer.data.playback.engine.audiophile
 import com.androidexpert35.audiophilemusicplayer.data.playback.engine.standard.StandardEngine
 import com.androidexpert35.audiophilemusicplayer.data.playback.native_.AudioFormatInfo
 import com.androidexpert35.audiophilemusicplayer.data.playback.native_.PipelinePathReport
-import com.androidexpert35.audiophilemusicplayer.data.playback.usb.UsbVolumeController
 import com.androidexpert35.audiophilemusicplayer.di.ApplicationScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -53,7 +52,6 @@ import javax.inject.Singleton
 class AudioEngineManager @Inject constructor(
     private val audiophileEngine: AudiophileEngine,
     private val standardEngine: StandardEngine,
-    private val usbVolumeController: UsbVolumeController,
     @param:ApplicationScope private val appScope: CoroutineScope,
 ) : AudioPlayerEngine {
 
@@ -131,16 +129,10 @@ class AudioEngineManager @Inject constructor(
 
     init {
         attachActive(standardEngine)
-        // Keep the standard-engine (ExoPlayer) volume in sync with the persisted
-        // app volume level. The audiophile path manages volume via the native
-        // bridge directly; this observer only targets the standard path so that
-        // volume keys work regardless of which engine is currently active.
-        appScope.launch {
-            usbVolumeController.volumePct.collect { pct ->
-                val linear = pct / 100f
-                standardEngine.setVolume(linear * linear) // quadratic taper, matching audiophile path
-            }
-        }
+        // Android playback uses STREAM_MUSIC volume. The independent USB-driver
+        // gain belongs only to its native sink; applying it here silently reduced
+        // ExoPlayer to the driver's initial 60%^2 even when system volume was 100%.
+        standardEngine.setVolume(1.0f)
     }
 
     // ── Hot-swap API ─────────────────────────────────────────────────────────

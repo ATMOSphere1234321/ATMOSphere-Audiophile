@@ -173,6 +173,8 @@ struct Uac2EndpointDsdInfo {
  * @property pcm_alt_setting        bAlternateSetting of a DoP-capable PCM alt
  *                                  setting (valid when supports_dop).
  * @property pcm_endpoint           bEndpointAddress of the DoP-capable PCM alt.
+ * @property pcm_interval           DoP endpoint ISO bInterval; zero means unverified.
+ * @property pcm_device_speed       Actual bus speed of the DoP endpoint.
  * @property pcm_bandwidth          effective_bytes_per_uframe of the PCM alt
  *                                  setting selected for DoP.
  */
@@ -191,7 +193,9 @@ struct Uac2DsdCapabilitySummary {
     uint8_t      pcm_interface          = 0;
     uint8_t      pcm_alt_setting        = 0;
     uint8_t      pcm_endpoint           = 0;
-    uint16_t     pcm_bandwidth          = 0;   ///< effective_bytes_per_uframe
+    uint16_t     pcm_bandwidth          = 0;   ///< Bytes per selected endpoint service interval.
+    uint8_t      pcm_interval           = 0;   ///< PCM fallback bInterval, not native DSD bInterval.
+    int          pcm_device_speed       = LIBUSB_SPEED_UNKNOWN; ///< Actual negotiated USB speed.
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,5 +1,8 @@
 package com.androidexpert35.audiophilemusicplayer.data.playback.usb
 
+import android.content.SharedPreferences
+import com.androidexpert35.audiophilemusicplayer.data.repository.SettingsPreferences
+
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -64,6 +67,7 @@ import javax.inject.Singleton
  */
 @Singleton
 class UsbDeviceScanner @Inject constructor(
+    private val prefs: SharedPreferences,
     @param:ApplicationContext private val context: Context,
     private val usbManager: UsbManager,
     private val descriptorParser: UsbAudioDescriptorParser,
@@ -123,6 +127,7 @@ class UsbDeviceScanner @Inject constructor(
      *   triggered, otherwise `false`.
      */
     fun requestPermission(deviceId: Int? = null): Boolean {
+        if (SettingsPreferences.androidUsbAudioEnabled(prefs)) return false
         val device = resolveTargetDevice(deviceId) ?: run {
             Log.w(TAG, "requestPermission skipped: no USB audio DAC available")
             return false
@@ -327,7 +332,8 @@ class UsbDeviceScanner @Inject constructor(
         // deferred to sink creation so opening Settings, receiving a broadcast,
         // or pausing playback can never detach/reacquire the kernel audio driver.
         // Runtime claim failures still fail closed in UsbAudioSinkFactory.
-        val isDirectUsbTransportSupported = hasPermission && isUac2Protocol
+        val isDirectUsbTransportSupported = hasPermission && isUac2Protocol &&
+            !SettingsPreferences.androidUsbAudioEnabled(prefs)
         val state = UsbAudioDeviceState(
             connectedDevice = preferredDevice.toDescriptor(),
             isPermissionGranted = hasPermission,

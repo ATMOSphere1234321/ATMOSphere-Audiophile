@@ -14,6 +14,17 @@ import com.androidexpert35.audiophilemusicplayer.data.repository.SettingsPrefere
  */
 object SettingsPreferences {
 
+    const val KEY_ANDROID_USB_AUDIO: String = "android_usb_audio_enabled"
+    const val DEFAULT_ANDROID_USB_AUDIO: Boolean = true
+    const val KEY_ANDROID_USB_BIT_PERFECT: String = "android_usb_bit_perfect_enabled"
+
+    fun androidUsbBitPerfectEnabled(prefs: android.content.SharedPreferences): Boolean =
+        prefs.getBoolean(KEY_ANDROID_USB_BIT_PERFECT, true)
+
+    fun androidUsbAudioEnabled(prefs: android.content.SharedPreferences): Boolean =
+        prefs.getBoolean(KEY_ANDROID_USB_AUDIO, DEFAULT_ANDROID_USB_AUDIO)
+
+
     /** Name of the dedicated SharedPreferences file storing app settings. */
     const val PREFS_NAME: String = "audiophile_settings"
 

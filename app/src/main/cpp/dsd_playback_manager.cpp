@@ -372,16 +372,14 @@ void DsdPlaybackManager::execute_fallback_to_dop() noexcept
     dop_config.sample_rate_hz = native_config.sample_rate_hz * 2U;
     dop_config.endpoint_address = capability_.pcm_endpoint;
 
-    const uint64_t required_bytes_per_uframe =
-        ((static_cast<uint64_t>(dop_config.sample_rate_hz) + 7'999ULL) / 8'000ULL) *
-        dop_config.bytes_per_audio_frame;
-    if (capability_.pcm_bandwidth != 0U &&
-        required_bytes_per_uframe > capability_.pcm_bandwidth) {
-        DMGRE("execute_fallback_to_dop: DoP needs %llu B/uframe but endpoint "
-              "0x%02X exposes only %u",
-              static_cast<unsigned long long>(required_bytes_per_uframe),
-              capability_.pcm_endpoint,
-              capability_.pcm_bandwidth);
+    dop_config.device_speed = capability_.pcm_device_speed;
+    dop_config.endpoint_interval = capability_.pcm_interval;
+    dop_config.endpoint_capacity_bytes = capability_.pcm_bandwidth;
+    const auto cadence = UsbIsoCadence::from_endpoint(dop_config.device_speed, dop_config.endpoint_interval);
+    const auto required = cadence ? cadence->max_packet_bytes(dop_config.sample_rate_hz,
+                                                              dop_config.bytes_per_audio_frame) : std::nullopt;
+    if (!required || !dop_config.endpoint_capacity_bytes || *required > dop_config.endpoint_capacity_bytes) {
+        DMGRE("execute_fallback_to_dop: invalid or insufficient DoP endpoint service-interval capacity");
         (void)ctx_->playback_state.transition_to(UsbPlaybackState::Failed);
         return;
     }

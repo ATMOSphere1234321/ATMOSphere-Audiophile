@@ -28,9 +28,14 @@ Priorities for new code:
 4. ✅ Ship new non-trivial logic **with** tests — don't extend the placeholder-only
    baseline (`ExampleUnitTest`).
 
-Native C++ has no unit harness in-repo; keep native logic verifiable by pushing
-decisions into testable Kotlin resolvers where practical, and verify the rest on real
-USB-DAC hardware.
+Native pure-format tests live in `app/src/main/cpp/tests/`. Build them in Debug
+(assertions enabled) with `AUDIPHILE_ENABLE_SANITIZERS=ON` and run the resulting
+`audiophile_native_core_tests`. They cover codec carrier choice, integer/float
+format dispatch, exact representable PCM, rounding, clipping, and DSD formatting.
+`MixerPcmFormatTest` checks actual encoding and mixer-confirmation identity;
+`AudioTrackEncodingFallbackTest` rejects integer-byte FLOAT fallback.
+Host tests do not establish device bit-perfect behavior. Verify the resulting APK
+with actual AudioFlinger route evidence and full USB-loop sample comparison.
 
 ---
 

@@ -11,8 +11,8 @@ import android.os.Build
 import android.util.Log
 import androidx.annotation.RequiresApi
 import com.androidexpert35.audiophilemusicplayer.data.playback.AudioAttributesFactory
-import com.androidexpert35.audiophilemusicplayer.data.playback.AudioFormatConverter.mapBitDepthToEncoding
-import com.androidexpert35.audiophilemusicplayer.data.playback.AudioFormatConverter.mapChannelCountToOutMask
+import com.androidexpert35.audiophilemusicplayer.data.playback.MixerPcmFormat
+import com.androidexpert35.audiophilemusicplayer.data.playback.native_.AudioFormatInfo
 import com.androidexpert35.audiophilemusicplayer.di.ApplicationScope
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -144,19 +144,19 @@ class UsbBitPerfectRouter @Inject constructor(
      * then applies the first profile whose format and bit-perfect behaviour
      * match the source exactly.
      *
-     * @param sampleRate Source sample rate in Hz (e.g. 44_100, 96_000, 192_000).
-     * @param bitDepth   Source PCM bit depth: 16, 24, or 32 (32 is treated as
-     *   IEEE float per Android's PCM_FLOAT contract).
-     * @param channelCount Number of interleaved channels (1 = mono, 2 = stereo).
+     * @param format Actual decoded PCM carrier. Source bit depth is telemetry
+     *   metadata and must not be used to infer integer versus float encoding.
      * @return [UsbRoutingResult] describing whether the DAC accepted the
      *   request, was unsupported, or rejected the format.
      */
-    fun routeAudio(sampleRate: Int, bitDepth: Int, channelCount: Int): UsbRoutingResult {
+    fun routeAudio(format: AudioFormatInfo): UsbRoutingResult {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             Log.d(TAG, "routeAudio skipped — API ${Build.VERSION.SDK_INT} < 34")
             return UsbRoutingResult.UnsupportedPlatform
         }
-        return routeAudioApi34(sampleRate, bitDepth, channelCount)
+        val carrier = MixerPcmFormat.fromDecoded(format)
+            ?: return UsbRoutingResult.UnsupportedFormat("Invalid decoded PCM carrier")
+        return routeAudioApi34(carrier)
     }
 
     /**
@@ -184,14 +184,17 @@ class UsbBitPerfectRouter @Inject constructor(
 
     @SuppressLint("NewApi")
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-    private fun routeAudioApi34(sampleRate: Int, bitDepth: Int, channelCount: Int): UsbRoutingResult {
+    private fun routeAudioApi34(carrier: MixerPcmFormat): UsbRoutingResult {
+        val sampleRate = carrier.sampleRateHz
+        val encoding = carrier.encoding
+        val channelMask = carrier.channelMask
         // ── Entry diagnostics ────────────────────────────────────────────────
         Log.i(
             TAG,
             "routeAudio enter — API=${Build.VERSION.SDK_INT} " +
                 "manufacturer='${Build.MANUFACTURER}' brand='${Build.BRAND}' " +
                 "model='${Build.MODEL}' " +
-                "requested: sr=$sampleRate bd=$bitDepth ch=$channelCount"
+                "requested: sr=$sampleRate enc=$encoding mask=$channelMask"
         )
 
         val manager = audioManager ?: run {
@@ -202,17 +205,6 @@ class UsbBitPerfectRouter @Inject constructor(
         val device = findConnectedUsbDac() ?: run {
             Log.w(TAG, "routeAudio: no USB DAC found — aborting")
             return UsbRoutingResult.NoUsbDevice
-        }
-
-        // ✅ CHANGED: delegates to shared AudioFormatConverter instead of local duplicate
-        val encoding = mapBitDepthToEncoding(bitDepth) ?: run {
-            Log.w(TAG, "routeAudio: unsupported bitDepth=$bitDepth — no encoding mapping")
-            return UsbRoutingResult.UnsupportedFormat("bitDepth=$bitDepth")
-        }
-        // ✅ CHANGED: delegates to shared AudioFormatConverter instead of local duplicate
-        val channelMask = mapChannelCountToOutMask(channelCount) ?: run {
-            Log.w(TAG, "routeAudio: unsupported channelCount=$channelCount — no mask mapping")
-            return UsbRoutingResult.UnsupportedFormat("channelCount=$channelCount")
         }
 
         Log.d(
@@ -323,7 +315,7 @@ class UsbBitPerfectRouter @Inject constructor(
             Log.i(
                 TAG,
                 "routeAudio: BIT_PERFECT route APPLIED ✓ — " +
-                    "'${device.productName}' sr=$sampleRate bd=$bitDepth ch=$channelCount"
+                    "'${device.productName}' sr=$sampleRate enc=$encoding mask=$channelMask"
             )
             val event = UsbRoutingEvent.Applied(
                 deviceId = device.id,
@@ -340,7 +332,7 @@ class UsbBitPerfectRouter @Inject constructor(
                     "The OS accepted the call but did not apply the preference. " +
                     "This can happen when the OEM audio policy manager rejects the request " +
                     "silently (observed on ColorOS 15+ with certain USB DACs). " +
-                    "device='${device.productName}' sr=$sampleRate bd=$bitDepth ch=$channelCount"
+                    "device='${device.productName}' sr=$sampleRate enc=$encoding mask=$channelMask"
             )
             _routingEvents.tryEmit(UsbRoutingEvent.Rejected(device.id, reason = "applyReturnedFalse"))
             UsbRoutingResult.Rejected(reason = "applyReturnedFalse")

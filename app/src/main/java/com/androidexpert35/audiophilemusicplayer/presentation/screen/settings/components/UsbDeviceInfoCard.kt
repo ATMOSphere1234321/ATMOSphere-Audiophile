@@ -39,6 +39,7 @@ fun UsbDeviceInfoCard(
     isRefreshInProgress: Boolean,
     onRefresh: () -> Unit,
     onRequestPermission: () -> Unit,
+    androidUsbAudioEnabled: Boolean = false,
 ) {
     val title = activePlaybackDeviceName
         ?.takeIf { isUsbPlaybackActive }
@@ -52,6 +53,8 @@ fun UsbDeviceInfoCard(
         )
     val supportingText = when {
         isUsbPlaybackActive -> stringResource(R.string.settings_usb_device_playback_active)
+        androidUsbAudioEnabled && status.isDeviceConnected ->
+            stringResource(R.string.settings_android_usb_audio_device)
         status.isDirectOutputReady -> stringResource(R.string.settings_usb_device_ready)
         status.isDeviceConnected && status.isPermissionGranted && !status.isDirectUsbTransportSupported ->
             stringResource(R.string.settings_usb_device_not_supported)
@@ -109,7 +112,7 @@ fun UsbDeviceInfoCard(
                     }
                 }
 
-                if (status.isDeviceConnected && !status.isPermissionGranted) {
+                if (!androidUsbAudioEnabled && status.isDeviceConnected && !status.isPermissionGranted) {
                     OutlinedButton(onClick = onRequestPermission) {
                         Text(text = stringResource(R.string.settings_usb_request_permission))
                     }

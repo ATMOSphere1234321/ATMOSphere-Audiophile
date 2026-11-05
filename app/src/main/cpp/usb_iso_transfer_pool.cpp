@@ -1,3 +1,4 @@
+// Cadence note: legacy "uframe" names refer to the selected ISO service interval.
 // ─────────────────────────────────────────────────────────────────────────────
 // usb_iso_transfer_pool.cpp
 //
@@ -15,6 +16,7 @@
 #include <cerrno>
 #include <chrono>      // steady_clock — DSD stall observation window timing
 #include <cstdlib>     // posix_memalign, free
+#include <limits>
 #include <cstring>     // memset, strerror
 #include <sstream>     // std::ostringstream
 
@@ -33,10 +35,6 @@ static constexpr const char *POOL_TAG = "IsoTransferPool";
 // Compile-time and run-time constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// USB 2.0 High-Speed microframes per second.
-/// 8 microframes/ms × 1000 ms/s = 8000 µframes/sec.
-static constexpr uint32_t USB_HS_UFRAMES_PER_SEC = 8'000U;
-
 /// Payload buffer alignment in bytes.
 /// 64 bytes matches the ARM64 L1 cache line size and is a conservative lower
 /// bound for DMA alignment requirements on Android SoCs.
@@ -52,37 +50,10 @@ static constexpr unsigned int ISO_TRANSFER_TIMEOUT_MS = 0U;
 // Microframe byte calculation (exported inline-equivalent for tests)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Compute the per-µframe payload size using ceiling integer division.
- *
- * ### Why ceiling division?
- *
- * For sample rates not evenly divisible by 8000 (e.g., 44.1, 88.2, 176.4,
- * 352.8 kHz), the exact bytes-per-µframe is fractional.  Allocating the
- * ceiling ensures the buffer is always large enough to hold the maximum
- * number of samples any given microframe might carry.
- *
- * In reality the hardware sends ceil(sample_rate/8000) samples in most
- * microframes and floor() in the remainder; the precise distribution is
- * governed by a feedback endpoint (handled in Step 5).  At this allocation
- * stage we always provide max capacity.
- *
- * Derivation for ceiling division without floating point:
- *   ceil(a / b) = (a + b - 1) / b  (integer arithmetic)
- *
- * @param sample_rate_hz        Audio sample rate in Hz.
- * @param bytes_per_audio_frame Bytes per interleaved audio sample-frame (e.g., 8).
- * @return                      Maximum bytes this pool must accommodate per µframe.
- */
-static uint32_t compute_bytes_per_uframe(uint32_t sample_rate_hz,
-                                          uint32_t bytes_per_audio_frame) noexcept
-{
-    // samples_per_uframe_ceil = ceil(sample_rate_hz / USB_HS_UFRAMES_PER_SEC)
-    // Integer ceiling: (a + b - 1) / b
-    const uint32_t samples_ceil =
-        (sample_rate_hz + USB_HS_UFRAMES_PER_SEC - 1U) / USB_HS_UFRAMES_PER_SEC;
-
-    return samples_ceil * bytes_per_audio_frame;
+// The factory validates cadence and all products before construction.
+static uint32_t compute_bytes_per_uframe(const IsoTransferPoolConfig& cfg) noexcept {
+    const auto cadence = UsbIsoCadence::from_endpoint(cfg.device_speed, cfg.endpoint_interval);
+    return *cadence->max_packet_bytes(cfg.sample_rate_hz, cfg.bytes_per_audio_frame);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -94,36 +65,9 @@ static uint32_t compute_bytes_per_uframe(uint32_t sample_rate_hz,
 /// for DSD/hi-rate configurations without heap allocation in the callback.
 static constexpr uint32_t kMaxBresPackets = 64U;
 
-/**
- * Compute per-packet byte counts for `packets_per_transfer` microframes using
- * the Bresenham (integer-DDA) phase accumulator.
- *
- * ### Why Bresenham is necessary for 44.1 kHz and DSD families
- *
- * For sample rates f that satisfy (f % 8000 == 0) — 48, 96, 192, 384 kHz —
- * each microframe carries exactly f/8000 samples and no accumulator is needed.
- *
- * For f not divisible by 8000 — 44100, 88200, 176400, 352800 Hz and the DSD64/
- * DSD128 byte rates — the ceiling-only approach allocates ceil(f/8000) frames
- * every microframe:
- *   44 100 Hz: ceil(5.5125) = 6 → 6 × 8000 = 48 000 Hz delivered ≡ +8.84% speed
- *
- * Bresenham distributes floor/ceil counts so the long-term average is exact:
- *   acc += sr;  frames = acc / 8000;  acc %= 8000;
- *
- * Over (8000 / gcd(sr, 8000)) microframes the byte sum equals exactly
- * sr × bytes_per_audio_frame / 8000 per µframe — pitch-perfect.
- *
- * ### Thread-safety
- *
- * `fractional_accumulator_` is modified here and nowhere else.  This function
- * is called from:
- *   - `allocate()` — on the JNI init thread, before any transfer is submitted.
- *   - `iso_transfer_callback` — on the libusb event thread (single thread).
- * Both call sites are serialised; no atomic protection is needed.
- *
- * @param packet_lengths_out  Output array of at least packets_per_transfer uint32_t.
- * @return                    Total byte count (= new libusb_transfer::length).
+/** Compute exact fractional audio-frame counts for each endpoint service interval.
+ * Called only before submission or by the single libusb event thread. No allocation.
+ * The 64-bit numerator handles every legal ISO bInterval without integer-Hz rounding.
  */
 uint32_t IsoTransferPool::compute_next_transfer_lengths(
         uint32_t *packet_lengths_out) noexcept
@@ -132,23 +76,13 @@ uint32_t IsoTransferPool::compute_next_transfer_lengths(
     const uint32_t sr  = cfg_.sample_rate_hz;
     const uint32_t bpf = cfg_.bytes_per_audio_frame;
 
-    // Defensive guard: if P somehow exceeds our stack-array max, fall back to
-    // the uniform ceiling value rather than overrunning the caller's array.
-    // In practice P == 8 for all supported configurations.
-    if (__builtin_expect(P > kMaxBresPackets, 0)) {
-        const uint32_t uniform = bytes_per_uframe_;
-        for (uint32_t p = 0; p < P && p < kMaxBresPackets; ++p) {
-            packet_lengths_out[p] = uniform;
-        }
-        return uniform * P;
-    }
+    // Invalid packet counts are rejected by create(), before any allocation.
+    if (__builtin_expect(P > kMaxBresPackets, 0)) return 0;
 
     uint32_t total = 0U;
     for (uint32_t p = 0; p < P; ++p) {
-        fractional_accumulator_ += sr;
-        const uint32_t frames = fractional_accumulator_ / USB_HS_UFRAMES_PER_SEC;
-        fractional_accumulator_ %= USB_HS_UFRAMES_PER_SEC;
-        const uint32_t bytes   = frames * bpf;
+        const uint64_t frames = cadence_.next_frames(sr, fractional_accumulator_);
+        const uint32_t bytes = static_cast<uint32_t>(frames * bpf);
         packet_lengths_out[p]  = bytes;
         total                 += bytes;
     }
@@ -558,9 +492,9 @@ void iso_transfer_callback(libusb_transfer *transfer)
     // calling libusb_submit_transfer() — libusb uses transfer->length as the
     // total DMA size and each iso_packet_desc[k].length as the per-µframe budget.
     //
-    // The buffer was allocated for buffer_size_per_xfer_ = ceil(sr/8000)×bpf×P
+    // The buffer was allocated for buffer_size_per_xfer_ = ceil(sr*interval_ticks/base_ticks_per_second)×bpf×P
     // bytes (ceiling), which is always ≥ new_total (Bresenham proof: each
-    // packet ≤ ceil(sr/8000)×bpf), so no buffer overflow is possible.
+    // packet ≤ ceil(sr*interval_ticks/base_ticks_per_second)×bpf), so no buffer overflow is possible.
     transfer->length = static_cast<int>(new_total);
     for (int p = 0; p < transfer->num_iso_packets; ++p) {
         transfer->iso_packet_desc[p].length =
@@ -600,12 +534,12 @@ void iso_transfer_callback(libusb_transfer *transfer)
 // ─────────────────────────────────────────────────────────────────────────────
 
 IsoTransferPool::IsoTransferPool(const IsoTransferPoolConfig &cfg) noexcept
-    : cfg_(cfg)
+    : cfg_(cfg),
+      cadence_(*UsbIsoCadence::from_endpoint(cfg.device_speed, cfg.endpoint_interval))
 {
     // Pre-compute derived constants.  No fallible operations here — the factory
     // validates cfg before calling the constructor.
-    bytes_per_uframe_    = compute_bytes_per_uframe(cfg_.sample_rate_hz,
-                                                    cfg_.bytes_per_audio_frame);
+    bytes_per_uframe_ = compute_bytes_per_uframe(cfg_);
     buffer_size_per_xfer_ = bytes_per_uframe_ * cfg_.packets_per_transfer;
 }
 
@@ -635,8 +569,17 @@ std::unique_ptr<IsoTransferPool> IsoTransferPool::create(
         return fail("endpoint_address must be non-zero");
     if (cfg.pool_size == 0)
         return fail("pool_size must be > 0");
-    if (cfg.packets_per_transfer == 0)
-        return fail("packets_per_transfer must be > 0");
+    if (cfg.packets_per_transfer == 0 || cfg.packets_per_transfer > kMaxBresPackets)
+        return fail("packets_per_transfer must be in 1..64");
+    const auto cadence = UsbIsoCadence::from_endpoint(cfg.device_speed, cfg.endpoint_interval);
+    if (!cadence) return fail("unsupported USB speed or invalid endpoint bInterval");
+    const auto packet_bytes = cadence->max_packet_bytes(cfg.sample_rate_hz, cfg.bytes_per_audio_frame);
+    if (!packet_bytes || !cfg.endpoint_capacity_bytes || *packet_bytes > cfg.endpoint_capacity_bytes)
+        return fail("audio packet exceeds selected endpoint service-interval capacity");
+    const uint64_t transfer_bytes = uint64_t{*packet_bytes} * cfg.packets_per_transfer;
+    if (transfer_bytes > std::numeric_limits<int>::max() ||
+        transfer_bytes * cfg.pool_size > std::numeric_limits<uint32_t>::max())
+        return fail("ISO transfer or pool byte count overflows");
 
     // ── Construct object (no allocation yet) ──────────────────────────────────
     // Use new(std::nothrow) so factory can return nullptr on OOM instead of
@@ -661,74 +604,12 @@ std::unique_ptr<IsoTransferPool> IsoTransferPool::create(
           pool->buffer_size_per_xfer_,
           pool->buffer_size_per_xfer_ * cfg.pool_size);
 
-    // ── UAC2 throughput sanity check ──────────────────────────────────────────
-    // Ceiling-based drain_rate_max = bytes_per_uframe * 8000, which can exceed
-    // the nominal pump_rate for fractional sample rates (44.1 kHz family, DSD).
-    // The Bresenham accumulator in compute_next_transfer_lengths() guarantees
-    // the long-term average equals pump_rate exactly for fractional rates, so
-    // the mismatch is expected and correct — it is NOT an error.
-    {
-        const uint32_t drain_rate_max =
-            pool->bytes_per_uframe_ * USB_HS_UFRAMES_PER_SEC;
-        const uint32_t pump_rate =
-            cfg.sample_rate_hz * cfg.bytes_per_audio_frame;
-        const bool is_fractional =
-            (cfg.sample_rate_hz % USB_HS_UFRAMES_PER_SEC) != 0U;
-
-        if (drain_rate_max == pump_rate) {
-            PLOGI("IsoTransferPool::create:  ✓ throughput exact — "
-                  "pump_rate=drain_rate=%u B/s  (rate is a multiple of 8 kHz)",
-                  pump_rate);
-        } else if (is_fractional) {
-            // For 44.1 kHz family and DSD, the ceiling drain always exceeds the
-            // pump rate — this is expected.  Bresenham corrects it at runtime.
-            //
-            // NOTE ON bytesPerUframe_ceil LOG VALUE
-            // ──────────────────────────────────────
-            // bytes_per_uframe_ceil reported here (e.g. 96 for DSD64 at 88.2kHz×8B)
-            // is the BUFFER ALLOCATION ceiling only — it is NOT the actual bytes
-            // sent per microframe.  The Bresenham accumulator distributes floor/ceil
-            // counts so the long-term average matches the nominal rate exactly:
-            //
-            //   DSD64 example (sampleRateHz=88200, bytesPerFrame=8):
-            //     bytes_per_uframe_ceil = ceil(88200/8000) × 8 = 12 × 8 = 96 B  ← buffer size
-            //     Bresenham per-µframe  = 11 frames (88 B) most µframes, 12 (96 B) every 40th
-            //     Long-term average     = 88.2 B/µframe  (= 88200/8000 × 8 ✓)
-            //     Total bytes/transfer  = Bresenham_avg × 8 packets = ~705.6 B
-            //
-            // The 96 B ceiling buffer guarantees no overflow when the 12-frame
-            // microframe fires; the Bresenham prevents the +8.84% speed error that
-            // ceiling-only allocation would produce.
-            PLOGI("IsoTransferPool::create:  ✓ throughput managed by Bresenham — "
-                  "nominal=%u B/s  ceiling_max=%u B/s  "
-                  "bytes_per_uframe_ceil=%u (BUFFER ALLOCATION ONLY — "
-                  "actual µframe sizes vary floor/ceil via Bresenham to average %.2f B/µframe)",
-                  pump_rate, drain_rate_max,
-                  pool->bytes_per_uframe_,
-                  static_cast<double>(pump_rate) / USB_HS_UFRAMES_PER_SEC);
-        } else {
-            // Non-fractional rate but drain != pump → genuine misconfiguration.
-            PLOGW("IsoTransferPool::create:  ⚠ THROUGHPUT MISMATCH  "
-                  "pump_rate=%u B/s  drain_rate_max=%u B/s  ratio=%.3f  "
-                  "→ ring will %s",
-                  pump_rate,
-                  drain_rate_max,
-                  (drain_rate_max > 0)
-                      ? static_cast<double>(pump_rate) / drain_rate_max
-                      : 0.0,
-                  (pump_rate > drain_rate_max)
-                      ? "OVERFLOW (full_ring_sleeps expected)"
-                      : "underrun (silence padding expected)");
-        }
-        PLOGI("IsoTransferPool::create:  bytes_per_uframe_ceil=%u (CEILING/ALLOC)  "
-              "packets_per_xfer=%u  buffer_cap=%u B  "
-              "Bresenham_avg=%u B/transfer  "
-              "(ring->pop() consumes exactly Bresenham bytes per packet — no padding waste)",
-              pool->bytes_per_uframe_,
-              cfg.packets_per_transfer,
-              pool->buffer_size_per_xfer_,
-              pump_rate * cfg.packets_per_transfer / USB_HS_UFRAMES_PER_SEC);
-    }
+    PLOGI("IsoTransferPool::create: speed=%d bInterval=%u service=%.3f us "
+          "capacity=%u B/interval required=%u B/interval nominal=%.0f B/s",
+          cfg.device_speed, cfg.endpoint_interval,
+          1'000'000.0 * cadence->interval_ticks / cadence->base_ticks_per_second,
+          cfg.endpoint_capacity_bytes, *packet_bytes,
+          static_cast<double>(cfg.sample_rate_hz) * cfg.bytes_per_audio_frame);
 
     // ── Perform all fallible allocations ──────────────────────────────────────
     if (!pool->allocate(handle, error_out)) {

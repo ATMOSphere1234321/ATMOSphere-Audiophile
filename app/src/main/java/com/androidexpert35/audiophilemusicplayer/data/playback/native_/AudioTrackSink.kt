@@ -13,11 +13,11 @@ import java.nio.ByteOrder
  * Low-level audiophile AudioTrack wrapper.
  *
  * Negotiates the highest-fidelity output path the current HAL will allow via
- * the three-rung fallback chain implemented in [buildAudioTrackWithFallback]:
+ * the encoding-preserving fallback chain in [buildAudioTrackWithFallback]:
  *
  * 1. `FLAG_DIRECT` + native encoding (source bit-depth, source sample rate).
- * 2. `FLAG_DIRECT` + `PCM_FLOAT` (integer decoders the HAL refused).
- * 3. Standard mixer path at the native encoding (last resort).
+ * 2. Standard mixer path at the same encoding (last resort).
+ * Integer bytes are never reinterpreted as FLOAT when direct output is refused.
  *    **Suppressed when [requireDirectOutput] = `true`** — used for DoP (DSD-over-PCM)
  *    transports that must not be routed through the software mixer because the
  *    volume/gain processing there would corrupt the DoP marker pattern.

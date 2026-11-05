@@ -12,6 +12,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import com.androidexpert35.audiophilemusicplayer.data.playback.POSITION_TICK_INTERVAL_MS
 import com.androidexpert35.audiophilemusicplayer.data.playback.cancelAndClear
@@ -224,7 +225,10 @@ class StandardEngine @Inject internal constructor(
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
         // NOTE: do NOT call setAudioOffloadPreferences — standard MediaCodec path only.
-        val built = ExoPlayer.Builder(context)
+        // Media3's default integer sink reduces high-resolution PCM to 16 bits.
+        // Float preserves every 24-bit sample in the ordinary Android mixer path.
+        val renderers = DefaultRenderersFactory(context).setEnableAudioFloatOutput(true)
+        val built = ExoPlayer.Builder(context, renderers)
             .setAudioAttributes(attrs, /* handleAudioFocus = */ false)
             .setHandleAudioBecomingNoisy(false) // adapter already owns becoming-noisy handling
             // Local-file playback with the screen off: without a wake lock the CPU

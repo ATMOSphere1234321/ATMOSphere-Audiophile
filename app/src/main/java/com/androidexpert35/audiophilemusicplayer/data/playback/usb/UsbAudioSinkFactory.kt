@@ -1,5 +1,8 @@
 package com.androidexpert35.audiophilemusicplayer.data.playback.usb
 
+import android.content.SharedPreferences
+import com.androidexpert35.audiophilemusicplayer.data.repository.SettingsPreferences
+
 import android.content.Context
 import android.hardware.usb.UsbConstants
 import android.media.AudioFormat
@@ -33,12 +36,15 @@ import javax.inject.Singleton
  */
 @Singleton
 class UsbAudioSinkFactory @Inject constructor(
+    private val prefs: SharedPreferences,
     @param:ApplicationContext private val context: Context,
     private val usbDeviceScanner: UsbDeviceScanner,
     private val usbManager: android.hardware.usb.UsbManager,
     private val usbBitPerfectRouter: UsbBitPerfectRouter,
     private val usbVolumeController: UsbVolumeController,
 ) {
+
+    internal fun usesAndroidUsbAudio(): Boolean = SettingsPreferences.androidUsbAudioEnabled(prefs)
 
     /** Returns the latest scanned USB-device snapshot used for output negotiation. */
     internal fun currentUsbDeviceState(): UsbAudioDeviceState = usbDeviceScanner.deviceState.value
@@ -55,6 +61,10 @@ class UsbAudioSinkFactory @Inject constructor(
      *   platform AudioTrack stack when direct USB playback is unavailable.
      */
     fun create(format: AudioFormatInfo, requireDirectOutput: Boolean = false): AudiophileOutputSink {
+        if (usesAndroidUsbAudio()) {
+            Log.i(PATH_TAG, "USB output selected: Android audio; direct USB permission ignored")
+            return createPlatformFallback(format, requireDirectOutput)
+        }
         val state = usbDeviceScanner.deviceState.value
         val device = usbDeviceScanner.getPermittedDevice()
 
@@ -207,12 +217,33 @@ class UsbAudioSinkFactory @Inject constructor(
         // AudioTrack is opened. On API < 34 this is a safe no-op. On failure or
         // format mismatch the sink is still created — playback continues through
         // the standard resampling mixer path.
-        val routingResult = usbBitPerfectRouter.routeAudio(
-            sampleRate = format.sampleRateHz,
-            bitDepth = format.sourceBitDepth,
-            channelCount = format.channelCount,
-        )
-        Log.d(TAG, "Platform fallback bit-perfect routing: $routingResult")
+        val androidOutput = usesAndroidUsbAudio()
+        val usbConnected = usbDeviceScanner.deviceState.value.connectedDevice != null ||
+            usbBitPerfectRouter.findConnectedUsbDac() != null
+        check(androidOutput || !usbConnected) {
+            "The player USB driver could not open this device. Grant USB access or select Android bit-perfect."
+        }
+        if (androidOutput && !SettingsPreferences.androidUsbBitPerfectEnabled(prefs)) {
+            usbBitPerfectRouter.clearRouting()
+            Log.i(PATH_TAG, "Android USB mixer selected without a bit-perfect preference")
+            return AudioTrackSink(context = context, format = format,
+                requireDirectOutput = requireDirectOutput)
+        }
+        val routingResult = usbBitPerfectRouter.routeAudio(format)
+        Log.d(TAG, "Selected Android bit-perfect routing: $routingResult")
+        if (androidOutput && usbConnected) {
+            if (routingResult is UsbRoutingResult.UnsupportedPlatform) {
+                // Android 13 has no preferred-mixer API. Keep the source PCM
+                // format and use its normal USB HAL; fidelity depends on the
+                // system mixer configuration, not a fictitious API guarantee.
+                Log.i(PATH_TAG, "Android USB AudioTrack at ${format.sampleRateHz} Hz; " +
+                    "preferred bit-perfect mixer API unavailable")
+            } else {
+                check(routingResult is UsbRoutingResult.Applied) {
+                    "Android bit-perfect unavailable for ${format.sampleRateHz} Hz: $routingResult"
+                }
+            }
+        }
         return AudioTrackSink(
             context = context,
             format = format,
@@ -239,6 +270,7 @@ class UsbAudioSinkFactory @Inject constructor(
      * @throws IllegalStateException When no permitted direct-USB DAC is available.
      */
     internal fun createNativeDsdSink(dsdRate: DsdRate): UsbAudioSink {
+        check(!usesAndroidUsbAudio()) { "Direct USB output is disabled by Android bit-perfect mode" }
         val state = usbDeviceScanner.deviceState.value
         val device = usbDeviceScanner.getPermittedDevice()
         check(device != null && state.isDirectUsbReady) {
@@ -285,6 +317,7 @@ class UsbAudioSinkFactory @Inject constructor(
      * @throws IllegalStateException When any step of the libusb sequence fails.
      */
     internal fun createLibusbDsdSink(dsdRate: DsdRate, path: String): LibusbDsdAudioSink {
+        check(!usesAndroidUsbAudio()) { "Direct USB output is disabled by Android bit-perfect mode" }
         val state = usbDeviceScanner.deviceState.value
         val device = usbDeviceScanner.getPermittedDevice()
 
@@ -538,6 +571,7 @@ class UsbAudioSinkFactory @Inject constructor(
      *   or any step of the init sequence fails.
      */
     internal fun createLibusbPcmSink(format: AudioFormatInfo, path: String): LibusbPcmAudioSink {
+        check(!usesAndroidUsbAudio()) { "Direct USB output is disabled by Android bit-perfect mode" }
         val state = usbDeviceScanner.deviceState.value
         val device = usbDeviceScanner.getPermittedDevice()
         check(device != null && state.isLibusbReady) {
@@ -640,7 +674,8 @@ class UsbAudioSinkFactory @Inject constructor(
                     sampleRateHz = format.sampleRateHz,
                     effectiveBitDepth = effectiveBitDepth,
                     channelCount = format.channelCount,
-                    requireExactPcm = false,
+                    // A matching container width does not make a RAW/DSD alternate PCM.
+                    requireExactPcm = true,
                 )
             ) ?: error(
                 "nativeSelectBestEndpointForFormat: no valid UAC2 endpoint selection for " +
@@ -962,6 +997,7 @@ class UsbAudioSinkFactory @Inject constructor(
      *   or any step of the init sequence fails.
      */
     internal fun createLibusbPcmEnhancedSink(format: AudioFormatInfo): LibusbPcmEnhancedSink {
+        check(!usesAndroidUsbAudio()) { "Direct USB output is disabled by Android bit-perfect mode" }
         val state = usbDeviceScanner.deviceState.value
         val device = usbDeviceScanner.getPermittedDevice()
         check(device != null && state.isLibusbReady) {

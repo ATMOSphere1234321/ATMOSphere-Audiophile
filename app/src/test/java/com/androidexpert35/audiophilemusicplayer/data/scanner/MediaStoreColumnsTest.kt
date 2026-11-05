@@ -15,11 +15,10 @@ class MediaStoreColumnsTest {
     fun `given one folder when selection is built then it constrains both volume and path`() {
         val selection = MediaStoreColumns.trackSelectionForFolders(listOf(musicFolder()))
 
-        assertTrue(selection.startsWith(MediaStoreColumns.TRACK_SELECTION))
         // Each folder keeps its own parentheses so the outer group stays a valid OR list
         // once a second folder is granted.
         assertEquals(
-            "duration > 30000 AND ((volume_name = ? AND relative_path LIKE ? ESCAPE '\\'))",
+            "((volume_name = ? AND relative_path LIKE ? ESCAPE '\\'))",
             selection
         )
     }

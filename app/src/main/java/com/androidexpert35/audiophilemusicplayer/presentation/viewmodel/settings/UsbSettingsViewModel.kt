@@ -1,6 +1,7 @@
 package com.androidexpert35.audiophilemusicplayer.presentation.viewmodel.settings
 
 import androidx.lifecycle.viewModelScope
+import com.androidexpert35.audiophilemusicplayer.domain.repository.SettingsRepository
 import com.androidexpert35.audiophilemusicplayer.R
 import com.androidexpert35.audiophilemusicplayer.domain.model.audio.AudioTelemetry
 import com.androidexpert35.audiophilemusicplayer.domain.model.audio.OutputRouteKind
@@ -35,6 +36,7 @@ import javax.inject.Inject
  */
 @HiltViewModel
 class UsbSettingsViewModel @Inject constructor(
+    private val settingsRepository: SettingsRepository,
     observeUsbAudioStatusUseCase: ObserveUsbAudioStatusUseCase,
     private val observeAudioTelemetryUseCase: ObserveAudioTelemetryUseCase,
     private val refreshUsbAudioDevicesUseCase: RefreshUsbAudioDevicesUseCase,
@@ -50,6 +52,20 @@ class UsbSettingsViewModel @Inject constructor(
 
     init {
         setSuccessState(UsbSettingsUiModel())
+
+        settingsRepository.observeAndroidUsbAudioEnabled()
+            .onEach { enabled ->
+                val current = uiState.value.data ?: UsbSettingsUiModel()
+                setSuccessState(current.copy(androidUsbAudioEnabled = enabled))
+            }
+            .launchIn(viewModelScope)
+
+        settingsRepository.observeAndroidUsbBitPerfectEnabled()
+            .onEach { enabled ->
+                val current = uiState.value.data ?: UsbSettingsUiModel()
+                setSuccessState(current.copy(androidUsbBitPerfectEnabled = enabled))
+            }
+            .launchIn(viewModelScope)
 
         observeUsbAudioStatusUseCase()
             .onEach { usbStatus ->
@@ -81,8 +97,44 @@ class UsbSettingsViewModel @Inject constructor(
 
     override fun handleEvent(event: UsbSettingsUiEvent) {
         when (event) {
+            is UsbSettingsUiEvent.SetAndroidUsbAudioEnabled -> handleAndroidUsbAudio(event.enabled)
+            is UsbSettingsUiEvent.SetAndroidUsbBitPerfectEnabled -> handleAndroidUsbBitPerfect(event.enabled)
             UsbSettingsUiEvent.RefreshUsbAudioDevices -> handleRefreshUsbDevices()
             UsbSettingsUiEvent.RequestUsbAudioPermission -> handleRequestUsbPermission()
+        }
+    }
+
+    private fun handleAndroidUsbBitPerfect(enabled: Boolean) {
+        val current = uiState.value.data ?: return
+        if (current.isAndroidUsbAudioSwitchInProgress) return
+        viewModelScope.launch {
+            setSuccessState(current.copy(isAndroidUsbAudioSwitchInProgress = true))
+            try {
+                when (val result = settingsRepository.setAndroidUsbBitPerfectEnabled(enabled)) {
+                    is Resource.Success -> Unit
+                    is Resource.Error -> emitError(result)
+                }
+            } finally {
+                val latest = uiState.value.data ?: current
+                setSuccessState(latest.copy(isAndroidUsbAudioSwitchInProgress = false))
+            }
+        }
+    }
+
+    private fun handleAndroidUsbAudio(enabled: Boolean) {
+        val current = uiState.value.data ?: return
+        if (current.isAndroidUsbAudioSwitchInProgress) return
+        viewModelScope.launch {
+            setSuccessState(current.copy(isAndroidUsbAudioSwitchInProgress = true))
+            try {
+                when (val result = settingsRepository.setAndroidUsbAudioEnabled(enabled)) {
+                    is Resource.Success -> Unit
+                    is Resource.Error -> emitError(result)
+                }
+            } finally {
+                val latest = uiState.value.data ?: current
+                setSuccessState(latest.copy(isAndroidUsbAudioSwitchInProgress = false))
+            }
         }
     }
 

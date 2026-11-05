@@ -13,7 +13,6 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.annotation.RequiresApi
-import com.androidexpert35.audiophilemusicplayer.data.playback.AudioFormatConverter.mapBitDepthToEncoding
 import com.androidexpert35.audiophilemusicplayer.data.playback.AudioFormatConverter.mapChannelCountToOutMask
 import com.androidexpert35.audiophilemusicplayer.data.playback.engine.AudioEngineManager
 import com.androidexpert35.audiophilemusicplayer.data.playback.native_.AudioFormatInfo
@@ -32,7 +31,6 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import java.util.Locale
@@ -56,7 +54,7 @@ import javax.inject.Singleton
  * 2. **Bit-perfect router events** — [UsbBitPerfectRouter.routingEvents] emits
  *    [UsbRoutingEvent.Applied] when the Android 14+ mixer-attributes preference
  *    is confirmed, and [UsbRoutingEvent.Rejected] / [UsbRoutingEvent.Cleared]
- *    when it is undone. These events drive [_bitPerfectConfirmed].
+ *    when it is undone. These events drive [_mixerConfirmation].
  *
  * 3. **Output route changes** — a [callbackFlow]-wrapped device callback and
  *    playback callback re-query Android's media policy for [mediaAttributes],
@@ -75,8 +73,9 @@ import javax.inject.Singleton
  *
  * All Android API version checks are encapsulated inside this class. Callers
  * collect [pathState] unconditionally; the validator emits
- * [AudioPathStatus.UNKNOWN] on engine idle, [AudioPathStatus.RESAMPLED] on API
- * 33 without FLAG_DIRECT, and [AudioPathStatus.DIRECT_BIT_PERFECT] only when
+ * [AudioPathStatus.UNKNOWN] when the actual mixed output rate is unavailable,
+ * [AudioPathStatus.RESAMPLED] for a known rate mismatch, and
+ * [AudioPathStatus.DIRECT_BIT_PERFECT] only when
  * every condition for that tier is met.
  *
  * @property context Application context used to obtain [AudioManager].
@@ -123,11 +122,10 @@ class AudioPathValidator @Inject constructor(
     // ── Bit-perfect confirmation ─────────────────────────────────────────────
 
     /**
-     * `true` when [UsbBitPerfectRouter] has received a confirmed
-     * [UsbRoutingEvent.Applied] event for the current stream and the
-     * confirmation has not since been cleared or superseded by a format change.
+     * Most recent mixer event, retaining encoding/rate/channel/device identity.
+     * It confirms playback only while every field matches the active sink.
      */
-    private val _bitPerfectConfirmed = MutableStateFlow(false)
+    private val _mixerConfirmation = MutableStateFlow<UsbRoutingEvent?>(null)
 
     // ── Active output device ──────────────────────────────────────────────────
 
@@ -162,9 +160,13 @@ class AudioPathValidator @Inject constructor(
     val pathState: StateFlow<AudioPathState> = combine(
         effectiveSourceFormat,
         audioEngineManager.pathReport,
-        _bitPerfectConfirmed,
+        _mixerConfirmation,
         currentOutputDevice,
-    ) { format, report, isBitPerfect, device ->
+    ) { format, report, confirmation, device ->
+        val carrier = report?.let { MixerPcmFormat(it.sampleRateHz, it.encoding, it.channelMask) }
+        val isBitPerfect = report != null &&
+            !report.usedFloatFallback && !report.isAppOwnedProcessingActive() &&
+            confirmation.confirms(carrier, device?.id)
         buildPathState(
             sourceFormat = format,
             report = report,
@@ -180,23 +182,11 @@ class AudioPathValidator @Inject constructor(
         )
 
     init {
-        // Reset bit-perfect confirmation whenever the source format changes so
-        // a newly loaded track always requires a fresh API 34+ router confirmation.
-        audioEngineManager.currentFormat
-            .map { it?.toFormatKey() }
-            .distinctUntilChanged()
-            .onEach { _bitPerfectConfirmed.value = false }
-            .launchIn(appScope)
-
-        // Translate router events into the boolean confirmation signal.
+        // Match confirmation against the active carrier when deriving pathState.
+        // Clearing on a separately collected source-format flow races the Applied
+        // event emitted while creating the sink, and also confuses S32 with FLOAT.
         usbBitPerfectRouter.routingEvents
-            .onEach { event ->
-                _bitPerfectConfirmed.value = when (event) {
-                    is UsbRoutingEvent.Applied -> true
-                    is UsbRoutingEvent.Changed -> event.isBitPerfect
-                    is UsbRoutingEvent.Rejected, is UsbRoutingEvent.Cleared -> false
-                }
-            }
+            .onEach { event -> _mixerConfirmation.value = event }
             .launchIn(appScope)
     }
 
@@ -236,7 +226,7 @@ class AudioPathValidator @Inject constructor(
      */
     fun clearSourceFormat() {
         _externalSourceFormat.value = null
-        _bitPerfectConfirmed.value = false
+        _mixerConfirmation.value = null
     }
 
     // ── State derivation ──────────────────────────────────────────────────────
@@ -275,17 +265,8 @@ class AudioPathValidator @Inject constructor(
         // We probe the *negotiated* output rate so isDirectPlaybackSupported
         // reflects whether the DAC can take that Sox-resampled format directly,
         // rather than always returning false for out-of-range DSD sources.
-        val probeFormat: AudioSourceFormat? = sourceFormat?.let { fmt ->
-            val negotiatedRate = report?.sampleRateHz ?: 0
-            if (fmt.sampleRateHz !in 4_000..192_000 &&
-                negotiatedRate in 4_000..192_000
-            ) {
-                // Substitute the Sox-resampled rate; bit-depth and channel count
-                // are preserved because Sox does not change those for this path.
-                fmt.copy(sampleRateHz = negotiatedRate)
-            } else {
-                fmt
-            }
+        val probeFormat = report?.let {
+            MixerPcmFormat(it.sampleRateHz, it.encoding, it.channelMask)
         }
 
         // Prefer live AudioDeviceInfo for type/name; fall back to path-report
@@ -357,7 +338,8 @@ class AudioPathValidator @Inject constructor(
      *
      * 3. No path report yet → [AudioPathStatus.UNKNOWN].
      *
-     * 4. `usedDirectFlag = false` → [AudioPathStatus.RESAMPLED].
+     * 4. Mixed output: report resampling only when the output rate is known
+     *    to differ; otherwise the processing status remains unknown.
      *
      * 5. `usedDirectFlag = true` + OEM DSP risk + HAL did **not** confirm direct
      *    playback for this specific format → [AudioPathStatus.OEM_WARNING].
@@ -421,7 +403,10 @@ class AudioPathValidator @Inject constructor(
         }
 
         // ── Tier 4: Standard mixer ───────────────────────────────────────────
-        if (!report.usedDirectFlag) return AudioPathStatus.RESAMPLED
+        if (!report.usedDirectFlag) {
+            return if (computeIsResamplingActive(report)) AudioPathStatus.RESAMPLED
+                   else AudioPathStatus.UNKNOWN
+        }
 
         // ── Tier 2 / 3: FLAG_DIRECT was granted ─────────────────────────────
         //
@@ -609,16 +594,19 @@ class AudioPathValidator @Inject constructor(
      * *confirmed* [AudioPathState.isBitPerfectConfirmed].
      *
      * @param sampleRateHz Source sample rate in Hz.
-     * @param bitDepth     Source PCM bit depth (16, 24, or 32).
+     * @param pcmEncoding Actual Android PCM encoding, not source bit depth.
      * @param channelCount Number of interleaved channels (1 or 2).
      * @return `true` when the connected DAC advertises a bit-perfect profile
      *   that matches the supplied parameters; `false` otherwise or on API < 34.
      */
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-    fun probeIsBitPerfectCapable(sampleRateHz: Int, bitDepth: Int, channelCount: Int): Boolean {
+    fun probeIsBitPerfectCapable(sampleRateHz: Int, pcmEncoding: Int, channelCount: Int): Boolean {
         val manager = audioManager ?: return false
         val device = usbBitPerfectRouter.findConnectedUsbDac() ?: return false
-        val encoding = mapBitDepthToEncoding(bitDepth) ?: return false
+        val encoding = pcmEncoding
+        if (encoding !in setOf(AudioFormat.ENCODING_PCM_16BIT,
+                AudioFormat.ENCODING_PCM_24BIT_PACKED, AudioFormat.ENCODING_PCM_32BIT,
+                AudioFormat.ENCODING_PCM_FLOAT)) return false
         val channelMask = mapChannelCountToOutMask(channelCount) ?: return false
 
         return runCatching {
@@ -651,21 +639,23 @@ class AudioPathValidator @Inject constructor(
      *   [format] without sample-rate conversion; `false` on unsupported format
      *   parameters or probe failure.
      */
-    private fun checkIsDirectPlaybackSupported(format: AudioSourceFormat): Boolean {
-        // ✅ CHANGED: delegates to shared AudioFormatConverter instead of local duplicate
-        val encoding = mapBitDepthToEncoding(format.bitDepth) ?: return false
-        val channelMask = mapChannelCountToOutMask(format.channelCount) ?: return false
+    private fun checkIsDirectPlaybackSupported(format: MixerPcmFormat): Boolean {
+        val encoding = format.encoding
+        val channelMask = format.channelMask
         // AudioFormat.Builder.setSampleRate() enforces 4 000–192 000 Hz.
         // DSD streams decoded to PCM by FFmpeg can produce rates up to 352 800 Hz
         // (DSD64) or higher. These rates cannot be probed via AudioTrack, so the
         // direct-playback path is unavailable and we return false immediately.
         if (format.sampleRateHz !in 4_000..192_000) return false
-        val audioFormat = AudioFormat.Builder()
-            .setSampleRate(format.sampleRateHz)
-            .setEncoding(encoding)
-            .setChannelMask(channelMask)
-            .build()
+        // The standard engine reports 0 until the output channel mask is known.
+        // Unknown output parameters cannot confirm direct playback support.
+        if (channelMask == AudioFormat.CHANNEL_INVALID) return false
         return runCatching {
+            val audioFormat = AudioFormat.Builder()
+                .setSampleRate(format.sampleRateHz)
+                .setEncoding(encoding)
+                .setChannelMask(channelMask)
+                .build()
             // AudioTrack.isDirectPlaybackSupported is the canonical API at minSdk 33.
             // The deprecation lint fires because API 34 renamed the preferred call site,
             // but no public AudioManager equivalent exists on API 33 — suppressing here
@@ -770,24 +760,17 @@ class AudioPathValidator @Inject constructor(
         report ?: return false
         if (report.usedDirectFlag) return false
         if (report.sampleRateHz <= 0) return false
+        // PROPERTY_OUTPUT_SAMPLE_RATE describes the primary output, not an
+        // independently clocked USB mixer. Its usual 48 kHz value cannot prove
+        // resampling of an Android USB AudioTrack.
+        val usbOutput = report.pathType == PathType.USB_DAC_ANDROID_HAL ||
+            report.routedDeviceType in setOf(AudioDeviceInfo.TYPE_USB_DEVICE,
+                AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_ACCESSORY)
         val effectiveThreadRateHz = report.activeOutputThreadSampleRateHz.takeIf { it > 0 }
-            ?: report.nativeOutputSampleRateHz.takeIf { it > 0 }
+            ?: report.nativeOutputSampleRateHz.takeIf { !usbOutput && it > 0 }
             ?: return false
         return report.sampleRateHz != effectiveThreadRateHz
     }
-
-    /**
-     * Derives a [AudioFormatInfo] format key as a triple of
-     * (sampleRateHz, sourceBitDepth, channelCount) for change detection.
-     *
-     * Used to trigger a [_bitPerfectConfirmed] reset when the loaded track
-     * changes to a format with different PCM parameters, ensuring a stale
-     * API 34+ confirmation from a prior track does not persist into a new session.
-     *
-     * @return Triple encoding the format's source PCM shape.
-     */
-    private fun AudioFormatInfo.toFormatKey(): Triple<Int, Int, Int> =
-        Triple(sampleRateHz, sourceBitDepth, channelCount)
 
     /**
      * Maps [AudioFormatInfo] to [AudioSourceFormat] for [effectiveSourceFormat].

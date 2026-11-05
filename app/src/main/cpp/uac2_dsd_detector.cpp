@@ -203,9 +203,11 @@ static const Uac2StreamingEndpointInfo *pick_better(
     if (current == nullptr) return next;
 
     // Prefer higher effective bandwidth.
-    if (next->effective_bytes_per_uframe > current->effective_bytes_per_uframe)
+    if (usb_iso_more_bandwidth(next->device_speed, next->endpoint_interval, next->effective_bytes_per_uframe,
+                              current->device_speed, current->endpoint_interval, current->effective_bytes_per_uframe))
         return next;
-    if (next->effective_bytes_per_uframe < current->effective_bytes_per_uframe)
+    if (usb_iso_more_bandwidth(current->device_speed, current->endpoint_interval, current->effective_bytes_per_uframe,
+                              next->device_speed, next->endpoint_interval, next->effective_bytes_per_uframe))
         return current;
 
     // Equal bandwidth — prefer lower (iface, alt) for determinism.
@@ -333,6 +335,8 @@ Uac2DsdCapabilitySummary uac2_detect_native_dsd(
         summary.pcm_alt_setting = best_dop->alt_setting;
         summary.pcm_endpoint    = best_dop->endpoint_address;
         summary.pcm_bandwidth   = best_dop->effective_bytes_per_uframe;
+        summary.pcm_interval    = best_dop->endpoint_interval;
+        summary.pcm_device_speed = best_dop->device_speed;
     }
 
     // ── Phase 3: Final diagnostic log ─────────────────────────────────────────

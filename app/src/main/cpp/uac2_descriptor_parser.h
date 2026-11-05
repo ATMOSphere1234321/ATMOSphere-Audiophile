@@ -1,3 +1,4 @@
+// Capacity note: effective_bytes_per_uframe is a legacy name for bytes/service interval.
 // ─────────────────────────────────────────────────────────────────────────────
 // uac2_descriptor_parser.h
 //
@@ -25,6 +26,8 @@
 
 #include <cstdint>
 #include <vector>
+
+#include "usb_iso_cadence.h"
 
 // Forward declaration — actual type lives in libusb/libusb.h.
 // Callers must open the device before invoking any parser functions.
@@ -205,25 +208,20 @@ struct Uac2AsGeneralInfo {
  * Only alternate settings with wMaxPacketSize > 0 appear here; alt setting 0
  * (the zero-bandwidth idle setting) is explicitly excluded.
  *
- * ### wMaxPacketSize interpretation (USB 2.0 HS §9.6.6)
- *
- * The raw field encodes two sub-fields for high-bandwidth isochronous pipes:
- *   bits 10:0 — base packet size in bytes
- *   bits 12:11 — additional transaction multiplier (0 = 1×, 1 = 2×, 2 = 3×)
- *
- * Effective bytes per 125 µs USB microframe:
- *   effective = (raw & 0x07FF) × ((raw >> 11 & 0x03) + 1)
- *
- * Example: wMaxPacketSize = 0x0C00 (FiiO K9 at DSD256/352.8 kHz)
- *   bytes = (0x0C00 & 0x07FF) = 0 ... actually: 0x03 = 3, mult = 1
- * → Must always use effective_bytes_per_uframe for bandwidth decisions.
+ * ### Capacity and cadence
+ * Full speed uses wMaxPacketSize (up to1023bytes/service interval). High speed
+ * also applies bits12:11 for one, two or three transactions. SuperSpeed uses
+ * companion wBytesPerInterval, checked against packet/burst/mult limits.
+ * Capacity is per service interval; divide by its duration when ranking
+ * throughput. The historical effective_bytes_per_uframe member name is retained.
  *
  * @property interface_number         bInterfaceNumber of the streaming interface.
  * @property alt_setting              bAlternateSetting index (always ≥ 1).
  * @property endpoint_address         bEndpointAddress (OUT: bit 7 = 0).
  * @property max_packet_size_raw      wMaxPacketSize as returned by libusb (host-endian).
- * @property effective_bytes_per_uframe  Actual payload capacity per microframe.
- * @property endpoint_interval        bInterval — service interval (microframes, 2^(N-1)).
+ * @property effective_bytes_per_uframe  Actual payload capacity per service interval (legacy field name).
+ * @property endpoint_interval        bInterval — 2^(N-1) FS frames or HS/SS microframes.
+ * @property device_speed             Actual libusb device speed; UNKNOWN is rejected.
  * @property sync_type                Isochronous sync type (bits 3:2 of bmAttributes).
  * @property as_general               Parsed UAC2 class-specific descriptor data.
  */
@@ -232,8 +230,9 @@ struct Uac2StreamingEndpointInfo {
     uint8_t  alt_setting                = 0;
     uint8_t  endpoint_address           = 0;
     uint16_t max_packet_size_raw        = 0;   ///< wMaxPacketSize, host-endian
-    uint16_t effective_bytes_per_uframe = 0;   ///< (raw & 0x7FF) × (mult + 1)
-    uint8_t  endpoint_interval          = 0;   ///< bInterval
+    uint16_t effective_bytes_per_uframe = 0;   ///< Bytes/service interval, including HS multiplier or SS companion.
+    uint8_t  endpoint_interval          = 0;   ///< ISO bInterval exponent, 1..16
+    int      device_speed               = LIBUSB_SPEED_UNKNOWN; ///< Actual bus speed
     uint8_t  sync_type                  = 0;   ///< (bmAttributes >> 2) & 0x03
     Uac2AsGeneralInfo as_general;
 };

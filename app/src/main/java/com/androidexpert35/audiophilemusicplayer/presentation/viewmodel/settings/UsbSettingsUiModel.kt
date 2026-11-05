@@ -15,6 +15,9 @@ import com.androidexpert35.audiophilemusicplayer.domain.model.audio.UsbAudioStat
  * @property isUsbDeviceRefreshInProgress Whether USB device discovery is being retried.
  */
 data class UsbSettingsUiModel(
+    val androidUsbAudioEnabled: Boolean = true,
+    val androidUsbBitPerfectEnabled: Boolean = true,
+    val isAndroidUsbAudioSwitchInProgress: Boolean = false,
     val usbAudioStatus: UsbAudioStatus = UsbAudioStatus(),
     val isUsbPlaybackActive: Boolean = false,
     val activeUsbPlaybackDeviceName: String? = null,

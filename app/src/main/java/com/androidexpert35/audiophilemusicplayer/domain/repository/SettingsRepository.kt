@@ -58,6 +58,16 @@ interface SettingsRepository {
      */
     fun observeUsbAudioStatus(): Flow<UsbAudioStatus>
 
+    /** Selects Android USB output independently of USB host permission. */
+    fun observeAndroidUsbAudioEnabled(): Flow<Boolean>
+
+    /** Persists the output choice and reloads the current audiophile track. */
+    suspend fun setAndroidUsbAudioEnabled(enabled: Boolean): Resource<Unit>
+
+    /** Selects preferred-mixer bit-perfect processing within the Android USB route. */
+    fun observeAndroidUsbBitPerfectEnabled(): Flow<Boolean>
+    suspend fun setAndroidUsbBitPerfectEnabled(enabled: Boolean): Resource<Unit>
+
     /**
      * Persists the "audiophile engine enabled" preference.
      *

@@ -68,8 +68,7 @@ class MediaStoreScanner @Inject constructor(
      * @return List of raw [ScannedAudioFile] records ordered by title, with fields
      *   recovered from ID3v2.2 tags wherever MediaStore missed them.
      */
-    // SAMPLERATE and BITS_PER_SAMPLE are T Extensions SDK symbols; the underlying columns
-    // exist on all Android 12+ (API 31+) devices and minSdk = 33 guarantees availability.
+    // Format columns depend on the installed MediaProvider extension, not just minSdk.
     @SuppressLint("NewApi")
     suspend fun scanAudioFilesForIndexing(
         folders: List<MusicFolderScope>,
@@ -79,13 +78,26 @@ class MediaStoreScanner @Inject constructor(
 
         val files = mutableListOf<ScannedAudioFile>()
 
-        contentResolver.query(
+        fun query(projection: Array<String>) = contentResolver.query(
             MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-            MediaStoreColumns.TRACK_PROJECTION,
+            projection,
             MediaStoreColumns.trackSelectionForFolders(folders),
             MediaStoreColumns.trackSelectionArgsForFolders(folders),
             MediaStoreColumns.TRACK_SORT_ORDER
-        )?.use { cursor ->
+        )
+        val optionalFormatColumns = setOf(
+            MediaStore.Audio.Media.SAMPLERATE,
+            MediaStore.Audio.Media.BITS_PER_SAMPLE,
+        )
+        val tracks = try {
+            query(MediaStoreColumns.TRACK_PROJECTION)
+        } catch (error: IllegalArgumentException) {
+            // Older vendor MediaProviders reject these extension columns even on API 33.
+            // Keep the same folder selection; unrelated query failures must still surface.
+            if (optionalFormatColumns.none { error.message == "Invalid column $it" }) throw error
+            query(MediaStoreColumns.TRACK_PROJECTION.filterNot { it in optionalFormatColumns }.toTypedArray())
+        }
+        tracks?.use { cursor ->
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID))
                 // Preserve MediaStore's raw value (including the "<unknown>" sentinel) so
@@ -112,9 +124,11 @@ class MediaStoreScanner @Inject constructor(
                 val composer = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Audio.AudioColumns.COMPOSER))
                     ?.trim()
                     ?.takeIf { it.isNotEmpty() }
-                // SAMPLERATE and BITS_PER_SAMPLE are available from API 31 (minSdk = 33).
-                val sampleRateHz = cursor.getInt(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.SAMPLERATE))
-                val bitDepth = cursor.getInt(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.BITS_PER_SAMPLE))
+                // Missing optional metadata stays unknown; the decoder determines the playback format.
+                val sampleRateColumn = cursor.getColumnIndex(MediaStore.Audio.Media.SAMPLERATE)
+                val bitDepthColumn = cursor.getColumnIndex(MediaStore.Audio.Media.BITS_PER_SAMPLE)
+                val sampleRateHz = if (sampleRateColumn >= 0) cursor.getInt(sampleRateColumn) else 0
+                val bitDepth = if (bitDepthColumn >= 0) cursor.getInt(bitDepthColumn) else 0
 
                 val contentUri = ContentUris.withAppendedId(
                     MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,

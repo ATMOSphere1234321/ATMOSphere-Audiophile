@@ -18,8 +18,8 @@ import com.androidexpert35.audiophilemusicplayer.data.scanner.MediaStoreColumns.
 object MediaStoreColumns {
 
     /** Projection for audio track queries — only the columns we actually map. */
-    // SAMPLERATE and BITS_PER_SAMPLE are T Extensions SDK symbols but the underlying
-    // MediaStore columns exist on all Android 12+ (API 31+) devices; minSdk = 33.
+    // These format columns require a recent MediaProvider extension. The scanner
+    // retries without them when an older vendor provider rejects either column.
     @SuppressLint("NewApi")
     val TRACK_PROJECTION: Array<String> = arrayOf(
         MediaStore.Audio.Media._ID,
@@ -40,18 +40,10 @@ object MediaStoreColumns {
         MediaStore.Audio.Media.YEAR,
         MediaStore.Audio.AudioColumns.GENRE,
         MediaStore.Audio.AudioColumns.COMPOSER,
-        // API 31+ columns — available on all supported devices (minSdk 33).
+        // Optional MediaProvider extension columns.
         MediaStore.Audio.Media.SAMPLERATE,
         MediaStore.Audio.Media.BITS_PER_SAMPLE,
     )
-
-    /**
-     * Base selection clause filtering out short audio files (ringtones, notifications).
-     *
-     * Always combined with a folder restriction built by [MediaStoreScanner] — the scan
-     * is scoped to the locations the user granted, never to the whole device.
-     */
-    const val TRACK_SELECTION = "${MediaStore.Audio.Media.DURATION} > 30000"
 
     /**
      * Escape character used with `LIKE` so folder names containing SQL wildcards
@@ -78,7 +70,8 @@ object MediaStoreColumns {
             "(${MediaStore.Audio.Media.VOLUME_NAME} = ? AND " +
                 "${MediaStore.Audio.Media.RELATIVE_PATH} LIKE ? ESCAPE '$LIKE_ESCAPE_CHAR')"
         }
-        return "$TRACK_SELECTION AND ($folderClause)"
+        // A granted music folder can contain short reference tracks, such as MSB tests.
+        return "($folderClause)"
     }
 
     /**

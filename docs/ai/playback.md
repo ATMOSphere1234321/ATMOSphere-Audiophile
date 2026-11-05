@@ -205,6 +205,10 @@ isochronous transfer happens in native code ([`native-audio.md`](native-audio.md
   learn supported formats, alt-settings, and DSD capability.
 - `UsbBitPerfectRouter` — applies `AudioManager.setPreferredMixerAttributes(BIT_PERFECT)`
   on API 34+ (needs `MODIFY_AUDIO_SETTINGS`) and reports confirmation.
+  Routing and confirmation use the decoded/output encoding, including the distinction
+  between S32 integer and float. Source bit depth remains separate telemetry. A mixer
+  event confirms only a matching device, rate, encoding, and channel mask; fallback
+  never reinterprets integer bytes as float.
 - `LibusbPcmAudioSink` / `LibusbDsdAudioSink` / `LibusbOutputSink` — drive the native
   decoder-pump libusb sink for PCM and DSD (DoP / native passthrough).
 - `LibusbPcmEnhancedSink` — keeps the Kotlin DSP write loop active for SUE and
@@ -284,3 +288,12 @@ rebuild or restart the active engine for a queue-only reorder.
   decisions recorded in `BIT_PERFECT_LIMITATIONS.md`.
 - ✅ When adding a JNI entry point or a new native sink, update both this file and
   [`native-audio.md`](native-audio.md).
+
+### Native USB endpoint cadence
+
+`nativeAllocateTransferPool` reads the descriptor for the claimed streaming
+interface, configured alternate and endpoint. It computes packet payloads from
+actual bus speed and ISO `bInterval`, and rejects insufficient interval capacity.
+DoP fallback re-reads its own PCM endpoint and uses that endpoint's cadence.
+The existing JNI parameter layout stays intact; Kotlin's legacy microframe
+estimates are diagnostic hints, not the native allocator's scheduling source.

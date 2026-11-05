@@ -1,7 +1,16 @@
 package com.androidexpert35.audiophilemusicplayer.presentation.screen.settings
 
+import android.os.Build
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -96,7 +105,69 @@ private fun UsbSettingsContent(
                 ),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                shape = MaterialTheme.shapes.large,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.settings_android_usb_audio_legacy_title),
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        Text(
+                            text = stringResource(when {
+                                !model.androidUsbAudioEnabled -> R.string.settings_android_usb_audio_off
+                                Build.VERSION.SDK_INT >= 34 && model.androidUsbBitPerfectEnabled ->
+                                    R.string.settings_android_usb_audio_on
+                                else -> R.string.settings_android_usb_audio_legacy_on
+                            }),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = model.androidUsbAudioEnabled,
+                        enabled = !model.isAndroidUsbAudioSwitchInProgress,
+                        onCheckedChange = { onEvent(UsbSettingsUiEvent.SetAndroidUsbAudioEnabled(it)) },
+                    )
+                }
+            }
+
+            if (Build.VERSION.SDK_INT >= 34) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    shape = MaterialTheme.shapes.large,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(stringResource(R.string.settings_android_usb_audio_title),
+                                style = MaterialTheme.typography.titleMedium)
+                            Text(stringResource(R.string.settings_android_usb_bit_perfect_description),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(
+                            checked = model.androidUsbBitPerfectEnabled,
+                            enabled = model.androidUsbAudioEnabled && !model.isAndroidUsbAudioSwitchInProgress,
+                            onCheckedChange = { onEvent(UsbSettingsUiEvent.SetAndroidUsbBitPerfectEnabled(it)) },
+                        )
+                    }
+                }
+            }
+
             UsbDeviceInfoCard(
+                androidUsbAudioEnabled = model.androidUsbAudioEnabled,
                 status = model.usbAudioStatus,
                 isUsbPlaybackActive = model.isUsbPlaybackActive,
                 activePlaybackDeviceName = model.activeUsbPlaybackDeviceName,

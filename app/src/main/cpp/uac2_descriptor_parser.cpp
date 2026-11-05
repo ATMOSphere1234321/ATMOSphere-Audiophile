@@ -1,3 +1,4 @@
+// Capacity note: legacy "uframe" names mean one endpoint service interval.
 // ─────────────────────────────────────────────────────────────────────────────
 // uac2_descriptor_parser.cpp
 //
@@ -27,6 +28,7 @@
 
 #include <android/log.h>
 #include <algorithm>      // std::stable_sort
+#include <limits>
 #include <cstring>        // std::memcpy
 
 #include "libusb/libusb.h"
@@ -62,28 +64,22 @@ static inline uint32_t read_le32(const uint8_t *buf, int offset) noexcept {
 
 // ─── wMaxPacketSize helpers ───────────────────────────────────────────────────
 
-/**
- * Compute the effective bytes per USB (micro)frame from wMaxPacketSize.
- *
- * For USB 2.0 High-Speed isochronous endpoints, bits 12:11 of wMaxPacketSize
- * encode additional transactions per microframe (0 = 1×, 1 = 2×, 2 = 3×).
- * Multiplying the base packet size by (multiplier + 1) yields the actual
- * bytes transferred in each 125 µs microframe.
- *
- * This is the critical figure for determining whether the endpoint can sustain
- * a required sample rate / bit depth without under-runs:
- *   e.g. PCM 192 kHz / 32-bit / 2ch → 192000 × 4 × 2 / 8000 microframes/sec
- *                                    = 192 bytes/microframe minimum.
- *
- * @param raw  wMaxPacketSize as returned by libusb (host-endian).
- * @return     Effective bytes deliverable per microframe.
- */
-static uint16_t compute_effective_bytes_per_uframe(uint16_t raw) noexcept {
-    const uint16_t base_size   = raw & USB_MPS_PACKET_SIZE_MASK;
-    const uint16_t multiplier  = (raw & USB_MPS_MULT_MASK) >> USB_MPS_MULT_SHIFT;
-    // multiplier 0b11 is reserved; clamp to 2 (3×) for safety.
-    const uint16_t safe_mult   = (multiplier > 2U) ? 2U : multiplier;
-    return base_size * (safe_mult + 1U);
+// Descriptor capacities are per service interval. SS requires its companion;
+// wMaxPacketSize alone omits bursts/multiple transactions and is insufficient.
+static uint16_t endpoint_service_capacity(int speed, const libusb_endpoint_descriptor& ep) {
+    uint32_t capacity = 0;
+    if (speed >= LIBUSB_SPEED_SUPER) {
+        libusb_ss_endpoint_companion_descriptor* companion = nullptr;
+        const int rc = libusb_get_ss_endpoint_companion_descriptor(nullptr, &ep, &companion);
+        if (rc == LIBUSB_SUCCESS && companion) {
+            capacity = usb_iso_service_capacity(speed, ep.wMaxPacketSize, true,
+                companion->bMaxBurst, companion->bmAttributes, companion->wBytesPerInterval);
+        }
+        if (companion) libusb_free_ss_endpoint_companion_descriptor(companion);
+    } else {
+        capacity = usb_iso_service_capacity(speed, ep.wMaxPacketSize);
+    }
+    return static_cast<uint16_t>(capacity);
 }
 
 // ─── Isochronous sync-type name (for logging) ─────────────────────────────────
@@ -371,6 +367,7 @@ uac2_find_streaming_endpoints(libusb_device_handle *device_handle)
     // device object that the handle was constructed from.  No reference-
     // counting change occurs — the device remains owned by the context.
     libusb_device *device = libusb_get_device(device_handle);
+    const int device_speed = libusb_get_device_speed(device);
 
     // ── Step B: Retrieve the active configuration descriptor ─────────────────
     // The active config is the one currently selected by the device.  On
@@ -442,9 +439,14 @@ uac2_find_streaming_endpoints(libusb_device_handle *device_handle)
                 info.alt_setting      = alt_num;
                 info.endpoint_address = ep.bEndpointAddress;
                 info.max_packet_size_raw        = ep.wMaxPacketSize;
-                info.effective_bytes_per_uframe =
-                    compute_effective_bytes_per_uframe(ep.wMaxPacketSize);
+                info.effective_bytes_per_uframe = endpoint_service_capacity(device_speed, ep);
                 info.endpoint_interval = ep.bInterval;
+                info.device_speed = device_speed;
+                if (!UsbIsoCadence::from_endpoint(device_speed, ep.bInterval) ||
+                    info.effective_bytes_per_uframe == 0) {
+                    PLOGW("Rejecting endpoint 0x%02X: unsupported speed/interval/capacity", ep.bEndpointAddress);
+                    continue;
+                }
                 info.sync_type         = (ep.bmAttributes >> 2) & 0x03U;
 
                 // ── Step F: Parse class-specific AS_GENERAL descriptor ─────────
@@ -544,7 +546,9 @@ uac2_select_best_endpoint(const std::vector<Uac2StreamingEndpointInfo> &candidat
     // lowest-numbered one.
     const auto *best = &candidates[0];
     for (const auto &candidate : candidates) {
-        if (candidate.effective_bytes_per_uframe > best->effective_bytes_per_uframe) {
+        if (usb_iso_more_bandwidth(candidate.device_speed, candidate.endpoint_interval,
+                                  candidate.effective_bytes_per_uframe, best->device_speed,
+                                  best->endpoint_interval, best->effective_bytes_per_uframe)) {
             best = &candidate;
         }
     }
@@ -581,22 +585,22 @@ uac2_select_endpoint_for_format(
     //   32-bit → 4 bytes/subslot
     const auto target_subslot = static_cast<uint8_t>(effective_bit_depth / 8);
 
-    // Minimum bytes per USB microframe required to sustain this stream:
-    //   ceil(sampleRateHz / 8000) × subslotSize × channelCount
-    // Uses hardware-matching subslotSize (not necessarily what the pump sends)
-    // so the bandwidth check reflects what the real endpoint must carry.
-    const auto required_bpuf = static_cast<uint16_t>(
-            ((sample_rate_hz + 7999) / 8000) * target_subslot * channel_count);
-
-    // ── Diagnostic: log all candidates before selection ───────────────────────
-    PLOGI("uac2_select_endpoint_for_format: target bitDepth=%d subslot=%u "
-          "channels=%d sampleRateHz=%d requiredBpuf=%u strictPcm=%s — scanning %zu candidate(s)",
-          effective_bit_depth, static_cast<unsigned>(target_subslot),
-          channel_count, sample_rate_hz,
-          static_cast<unsigned>(required_bpuf), require_exact_pcm ? "yes" : "no",
-          candidates.size());
+    if ((effective_bit_depth != 16 && effective_bit_depth != 24 && effective_bit_depth != 32) ||
+        channel_count <= 0 || channel_count > 255 || sample_rate_hz <= 0) return nullptr;
+    // Calculate each candidate separately: service intervals and wire subslots vary.
+    const auto required_packet = [&](const Uac2StreamingEndpointInfo& c) -> std::optional<uint32_t> {
+        const auto cadence = UsbIsoCadence::from_endpoint(c.device_speed, c.endpoint_interval);
+        if (!cadence) return std::nullopt;
+        const uint32_t subslot = c.as_general.subslot_size ? c.as_general.subslot_size : target_subslot;
+        return cadence->max_packet_bytes(static_cast<uint32_t>(sample_rate_hz),
+                                         subslot * static_cast<uint32_t>(channel_count));
+    };
+    PLOGI("uac2_select_endpoint_for_format: bitDepth=%d channels=%d rate=%d strictPcm=%s candidates=%zu",
+          effective_bit_depth, channel_count, sample_rate_hz, require_exact_pcm ? "yes" : "no", candidates.size());
 
     for (const auto &c : candidates) {
+        const auto required = required_packet(c);
+        const uint32_t required_bpuf = required.value_or(std::numeric_limits<uint32_t>::max());
         if (c.as_general.is_present) {
             PLOGI("  candidate iface=%u alt=%u ep=0x%02X bpuf=%u | "
                   "subslot=%u bitRes=%u nrCh=%u meetsRequired=%s subslotMatch=%s bitResMatch=%s",
@@ -645,7 +649,8 @@ uac2_select_endpoint_for_format(
 
         for (const auto &c : candidates) {
             // All passes require sufficient bandwidth.
-            if (c.effective_bytes_per_uframe < required_bpuf) {
+            const auto required = required_packet(c);
+            if (!required || c.effective_bytes_per_uframe < *required) {
                 continue;
             }
 
@@ -709,7 +714,7 @@ uac2_select_endpoint_for_format(
                   best->endpoint_address,
                   best->as_general.subslot_size,
                   best->as_general.bit_resolution,
-                  static_cast<unsigned>(required_bpuf),
+                  static_cast<unsigned>(*required_packet(*best)),
                   best->effective_bytes_per_uframe);
             return best;
         }
@@ -719,9 +724,8 @@ uac2_select_endpoint_for_format(
 
     PLOGE("uac2_select_endpoint_for_format: NO suitable endpoint found for "
           "bitDepth=%d subslot=%u sampleRateHz=%d channels=%d — "
-          "requiredBpuf=%u exceeds all candidates",
+          "no candidate has a compatible service interval/capacity",
           effective_bit_depth, static_cast<unsigned>(target_subslot),
-          sample_rate_hz, channel_count,
-          static_cast<unsigned>(required_bpuf));
+          sample_rate_hz, channel_count);
     return nullptr;
 }

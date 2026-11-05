@@ -984,6 +984,21 @@ Java_com_androidexpert35_audiophilemusicplayer_data_playback_usb_UsbAudioBridge_
     cfg.pool_size             = static_cast<uint32_t>(poolSize);
     cfg.packets_per_transfer  = static_cast<uint32_t>(packetsPerTransfer);
 
+    // Endpoint addresses may repeat across alternates. Bind cadence/capacity to
+    // the interface and alternate that were actually claimed/configured.
+    const auto endpoints = uac2_find_streaming_endpoints(ctx->device_handle);
+    const auto selected = std::find_if(endpoints.begin(), endpoints.end(), [&](const auto& ep) {
+        return ep.interface_number == ctx->claimed_interface_number &&
+               ep.alt_setting == ctx->active_alt_setting && ep.endpoint_address == cfg.endpoint_address;
+    });
+    if (selected == endpoints.end()) {
+        ULOGE("nativeAllocateTransferPool: active endpoint cadence/capacity unavailable");
+        return -2;
+    }
+    cfg.device_speed = selected->device_speed;
+    cfg.endpoint_interval = selected->endpoint_interval;
+    cfg.endpoint_capacity_bytes = selected->effective_bytes_per_uframe;
+
     std::string error_msg;
     ctx->transfer_pool = IsoTransferPool::create(ctx->device_handle, cfg, &error_msg);
 
@@ -1248,6 +1263,23 @@ Java_com_androidexpert35_audiophilemusicplayer_data_playback_usb_UsbAudioBridge_
             std::max(0, std::min(static_cast<int>(
                                      std::numeric_limits<uint16_t>::max()),
                                  static_cast<int>(pcmBandwidth))));
+    // JNI's legacy capability tuple omits bInterval. Re-read the exact DoP
+    // fallback descriptor without changing the Java ABI or inheriting native cadence.
+    if (capability.supports_dop) {
+        const auto endpoints = uac2_find_streaming_endpoints(ctx->device_handle);
+        const auto pcm = std::find_if(endpoints.begin(), endpoints.end(), [&](const auto& ep) {
+            return ep.interface_number == capability.pcm_interface &&
+                   ep.alt_setting == capability.pcm_alt_setting && ep.endpoint_address == capability.pcm_endpoint;
+        });
+        if (pcm == endpoints.end()) {
+            ULOGE("nativeStartDsdPlayback: DoP fallback endpoint cadence/capacity unavailable");
+            usb_transport_abort(ctx);
+            return -5;
+        }
+        capability.pcm_interval = pcm->endpoint_interval;
+        capability.pcm_device_speed = pcm->device_speed;
+        capability.pcm_bandwidth = pcm->effective_bytes_per_uframe;
+    }
 
     // ── Step E: Configure dsd_formatter for Native DSD ────────────────────────
     // Select MSBF (standard) or LSBF (legacy) based on caller's flag.

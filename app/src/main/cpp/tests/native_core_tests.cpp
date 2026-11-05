@@ -12,6 +12,7 @@
 #include "fd_trampoline_path.h"
 #include "native_dsd_formatter.h"
 #include "pcm_wire_formatter.h"
+#include "pcm_output_format.h"
 #include "usb_handle_validation.h"
 #include "usb_playback_state.h"
 
@@ -356,10 +357,83 @@ void test_parse_fd_trampoline_path()
     assert(parse_fd_trampoline_path("/proc/self/fd/99999999999") == -1);
 }
 
+void test_explicit_float_pcm_keeps_float_carrier()
+{
+    for (const auto codec : {AV_CODEC_ID_PCM_F32LE, AV_CODEC_ID_PCM_F32BE,
+                             AV_CODEC_ID_PCM_F64LE, AV_CODEC_ID_PCM_F64BE}) {
+        const auto packed = (codec == AV_CODEC_ID_PCM_F64LE || codec == AV_CODEC_ID_PCM_F64BE)
+            ? AV_SAMPLE_FMT_DBL : AV_SAMPLE_FMT_FLT;
+        const auto result = choose_pcm_output_format(codec, packed, 0);
+        assert(result.sample_format == AV_SAMPLE_FMT_FLT);
+        assert(result.android_encoding == 4);
+    }
+    const auto lossy = choose_pcm_output_format(AV_CODEC_ID_AAC, AV_SAMPLE_FMT_FLT, 0);
+    assert(lossy.sample_format == AV_SAMPLE_FMT_S16 && lossy.android_encoding == 2);
+    for (const int bits : {16, 24, 32}) {
+        const auto result = choose_pcm_output_format(AV_CODEC_ID_FLAC, AV_SAMPLE_FMT_S32, bits);
+        assert(result.sample_format == (bits == 16 ? AV_SAMPLE_FMT_S16 : AV_SAMPLE_FMT_S32));
+        assert(result.android_encoding == (bits == 16 ? 2 : 22));
+    }
+}
+
+void test_decoded_float_dispatch_preserves_representable_pcm()
+{
+    const PcmWireFormatter formatter({96000U, 2U, 4U, 32U});
+    // Exact 24-bit-representable values, including samples whose low 16 bits
+    // are nonzero. Independent integer oracle detects S16 reduction, a float
+    // bitcast, and asymmetric INT32_MAX scaling.
+    const std::array<int32_t, 10> expected{
+        0, 256, -256, 1610612736, -1610612736,
+        2030000128, -2030000128, INT32_MIN, 2147483392, -2147483392};
+    std::array<float, expected.size()> input{};
+    std::array<uint8_t, expected.size() * 4> output{};
+    for (std::size_t i = 0; i < input.size(); ++i)
+        input[i] = static_cast<float>(static_cast<double>(expected[i]) / 2147483648.0);
+    const auto result = formatter.format_android_pcm(
+        reinterpret_cast<const uint8_t *>(input.data()), sizeof(input), 4, 1.0,
+        output.data(), output.size());
+    assert(result.success && result.bytes_written == output.size());
+    for (std::size_t i = 0; i < expected.size(); ++i)
+        assert(read_s32le(output.data() + i * 4) == expected[i]);
+}
+
+void test_float_unity_rounding_and_saturation()
+{
+    const PcmWireFormatter formatter({48000U, 2U, 4U, 32U});
+    const std::array<float, 8> input{
+        0.5F / 2147483648.0F, -0.5F / 2147483648.0F,
+        1.5F / 2147483648.0F, -1.5F / 2147483648.0F,
+        1.0F, -1.0F, 0.75F, -0.75F};
+    const std::array<int32_t, 8> expected{1, -1, 2, -2, INT32_MAX, INT32_MIN,
+                                       1610612736, -1610612736};
+    std::array<uint8_t, input.size() * 4> output{};
+    const auto result = formatter.format_android_pcm(
+        reinterpret_cast<const uint8_t *>(input.data()), sizeof(input), 4, 1.0,
+        output.data(), output.size());
+    assert(result.success);
+    for (std::size_t i = 0; i < expected.size(); ++i)
+        assert(read_s32le(output.data() + i * 4) == expected[i]);
+}
+
+void test_unknown_decoder_encoding_is_rejected_atomically()
+{
+    const PcmWireFormatter formatter({44100U, 2U, 4U, 32U});
+    const std::array<uint8_t, 4> input{};
+    std::array<uint8_t, 4> output{0xAA, 0xAA, 0xAA, 0xAA};
+    const auto result = formatter.format_android_pcm(
+        input.data(), input.size(), 0, 1.0, output.data(), output.size());
+    assert(!result.success);
+    for (const auto byte : output) assert(byte == 0xAA);
+}
+
 } // namespace
 
 int main()
 {
+    test_explicit_float_pcm_keeps_float_carrier();
+    test_decoded_float_dispatch_preserves_representable_pcm();
+    test_float_unity_rounding_and_saturation();
+    test_unknown_decoder_encoding_is_rejected_atomically();
     test_s16_unity_is_exact();
     test_s32_unity_is_exact();
     test_s16_attenuation_uses_extra_bits();

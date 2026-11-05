@@ -53,6 +53,18 @@ public:
             std::size_t output_capacity) const noexcept;
 
     /**
+     * Formats decoder bytes according to their Android PCM encoding, never their
+     * byte width alone. Unsupported encodings fail without writing output.
+     */
+    [[nodiscard]] PcmFormatResult format_android_pcm(
+            const uint8_t *input,
+            std::size_t input_bytes,
+            int android_encoding,
+            double gain,
+            uint8_t *output,
+            std::size_t output_capacity) const noexcept;
+
+    /**
      * Converts normalized interleaved float32 samples to the same negotiated
      * integer USB representation used by the decoder pump.
      */

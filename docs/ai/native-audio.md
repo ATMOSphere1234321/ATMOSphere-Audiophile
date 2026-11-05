@@ -164,6 +164,13 @@ PCM follows an exact integer-only unity path.
 
 `PcmWireFormatter` is the only PCM-to-USB quantisation boundary:
 
+- Explicit PCM float codecs retain float output even when FFmpeg leaves raw bit depth
+  unset. PCM_F64 still reduces to the supported F32 carrier and is not lossless.
+  The USB pump dispatches by Android PCM encoding, not sample byte width.
+- Float-to-S32 uses a symmetric `2^31` scale, round-half-away-from-zero, then saturation
+  and endpoint quantisation. At unity, S32-representable float samples retain their
+  values; arbitrary sub-LSB floats cannot be represented exactly by integer USB PCM.
+
 - S16 is widened before gain. Under attenuation, precision is retained in the low
   bits of the 32-bit USB subslot instead of being requantised to `int16_t`.
 - S32 and float enhanced output use the same rounding, clamp, valid-bit mask, and
@@ -278,3 +285,19 @@ because `DecoderToRingBridge` deliberately never applies the volume multiply to 
 When you change this layer, update [`playback.md`](playback.md),
 [`/docs/BIT_PERFECT_LIMITATIONS.md`](../BIT_PERFECT_LIMITATIONS.md) (if a limitation
 changes), and the CMake header comment if the source set changes.
+
+### USB service-interval scheduling
+
+The packet pool and endpoint selectors use `usb_iso_cadence.h`: ISO `bInterval`
+is an exponent over 1 ms ticks at full speed or 125 µs ticks at high/super speed.
+A 64-bit rational phase accumulator schedules complete audio frames without
+rounding intervals to an integer packet frequency. Initial allocation re-reads
+the endpoint matching the claimed interface, active alternate and address.
+DoP fallback uses the PCM endpoint's own interval, speed and capacity.
+
+High-speed capacities include transaction bits; SuperSpeed capacities come
+from the companion descriptor's `wBytesPerInterval`. Missing/invalid descriptors
+and extended SSP isochronous companion encodings fail closed. Unknown bus speed
+is not silently treated as high speed. Legacy API names containing `uframe`
+refer to an endpoint service interval. Host cadence tests use no-device libusb
+stubs; real DAC timing and fallback still require device validation.

@@ -190,12 +190,68 @@ class SettingsRepositoryImpl @Inject constructor(
         awaitClose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
 
+    override fun observeAndroidUsbAudioEnabled(): Flow<Boolean> = callbackFlow {
+        trySend(SettingsPreferences.androidUsbAudioEnabled(prefs))
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { sp, key ->
+            if (key == SettingsPreferences.KEY_ANDROID_USB_AUDIO) {
+                trySend(SettingsPreferences.androidUsbAudioEnabled(sp))
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        awaitClose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+
+    override fun observeAndroidUsbBitPerfectEnabled(): Flow<Boolean> = callbackFlow {
+        trySend(SettingsPreferences.androidUsbBitPerfectEnabled(prefs))
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { sp, key ->
+            if (key == SettingsPreferences.KEY_ANDROID_USB_BIT_PERFECT) {
+                trySend(SettingsPreferences.androidUsbBitPerfectEnabled(sp))
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        awaitClose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+
+    override suspend fun setAndroidUsbBitPerfectEnabled(enabled: Boolean): Resource<Unit> {
+        if (SettingsPreferences.androidUsbBitPerfectEnabled(prefs) == enabled) {
+            return Resource.Success(Unit)
+        }
+        val committed = withContext(ioDispatcher) {
+            prefs.edit().putBoolean(SettingsPreferences.KEY_ANDROID_USB_BIT_PERFECT, enabled).commit()
+        }
+        if (!committed) {
+            return Resource.Error(ResourceError.StorageError("Unable to save the mixer setting."))
+        }
+        if (SettingsPreferences.androidUsbAudioEnabled(prefs)) audioEngineManager.reloadCurrentTrack()
+        return Resource.Success(Unit)
+    }
+
+    override suspend fun setAndroidUsbAudioEnabled(enabled: Boolean): Resource<Unit> {
+        if (SettingsPreferences.androidUsbAudioEnabled(prefs) == enabled) {
+            return Resource.Success(Unit)
+        }
+        val committed = withContext(ioDispatcher) {
+            prefs.edit().putBoolean(SettingsPreferences.KEY_ANDROID_USB_AUDIO, enabled).commit()
+        }
+        if (!committed) {
+            return Resource.Error(ResourceError.StorageError("Unable to save the USB output setting."))
+        }
+        audioEngineManager.reloadCurrentTrack()
+        if (!enabled && audioEngineManager.activeEngineType.value == EngineType.AUDIOPHILE &&
+            usbDeviceScanner.deviceState.value.connectedDevice != null &&
+            !usbDeviceScanner.deviceState.value.isPermissionGranted
+        ) {
+            usbDeviceScanner.requestPermission()
+        }
+        return Resource.Success(Unit)
+    }
+
     override fun observeUsbAudioStatus(): Flow<UsbAudioStatus> = usbDeviceScanner.deviceState.map { state ->
         UsbAudioStatus(
             isDeviceConnected = state.connectedDevice != null,
             isPermissionGranted = state.isPermissionGranted,
-            isDirectOutputReady = state.isDirectUsbReady,
-            isDirectUsbTransportSupported = state.isDirectUsbTransportSupported,
+            isDirectOutputReady = state.isLibusbReady || state.isDirectUsbReady,
+            isDirectUsbTransportSupported = state.isLibusbReady || state.isDirectUsbTransportSupported,
             activeDeviceName = state.connectedDevice?.deviceName,
             supportedFormats = state.supportedProfiles.map(::toDomainFormat).distinct(),
             areSupportedFormatsEstimated = state.areSupportedProfilesEstimated,
@@ -233,7 +289,7 @@ class SettingsRepositoryImpl @Inject constructor(
             )
         }
 
-        if (enabled &&
+        if (enabled && !SettingsPreferences.androidUsbAudioEnabled(prefs) &&
             usbDeviceScanner.deviceState.value.connectedDevice != null &&
             !usbDeviceScanner.deviceState.value.isPermissionGranted
         ) {

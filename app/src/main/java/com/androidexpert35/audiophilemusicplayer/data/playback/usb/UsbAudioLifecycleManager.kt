@@ -1,5 +1,8 @@
 package com.androidexpert35.audiophilemusicplayer.data.playback.usb
 
+import android.content.SharedPreferences
+import com.androidexpert35.audiophilemusicplayer.data.repository.SettingsPreferences
+
 import android.util.Log
 import com.androidexpert35.audiophilemusicplayer.data.playback.engine.AudioEngineManager
 import com.androidexpert35.audiophilemusicplayer.data.playback.engine.EngineType
@@ -30,6 +33,7 @@ import javax.inject.Singleton
  */
 @Singleton
 class UsbAudioLifecycleManager @Inject constructor(
+    private val prefs: SharedPreferences,
     private val settingsRepository: SettingsRepository,
     private val usbDeviceScanner: UsbDeviceScanner,
     private val audioEngineManager: AudioEngineManager,
@@ -96,7 +100,9 @@ class UsbAudioLifecycleManager @Inject constructor(
 
                         is UsbAudioEvent.PermissionDenied -> {
                             Log.w(TAG, "USB permission denied for ${event.device.deviceName}")
-                            refreshAudiophileOutputIfNeeded()
+                            if (!SettingsPreferences.androidUsbAudioEnabled(prefs)) {
+                                refreshAudiophileOutputIfNeeded()
+                            }
                         }
                     }
                 }
@@ -117,7 +123,9 @@ class UsbAudioLifecycleManager @Inject constructor(
                 .filter { granted -> granted }
                 .collect {
                     Log.d(TAG, "USB permission state → granted (deviceState observer)")
-                    refreshAudiophileOutputIfNeeded()
+                    if (!SettingsPreferences.androidUsbAudioEnabled(prefs)) {
+                        refreshAudiophileOutputIfNeeded()
+                    }
                 }
         }
     }
@@ -136,7 +144,7 @@ class UsbAudioLifecycleManager @Inject constructor(
     }
 
     private fun requestUsbPermissionIfNeeded(deviceId: Int? = null) {
-        if (!audiophileEngineEnabled) return
+        if (!audiophileEngineEnabled || SettingsPreferences.androidUsbAudioEnabled(prefs)) return
 
         val deviceState = usbDeviceScanner.deviceState.value
         val targetDeviceId = deviceId ?: deviceState.connectedDevice?.deviceId

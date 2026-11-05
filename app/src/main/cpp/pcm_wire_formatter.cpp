@@ -89,6 +89,29 @@ PcmFormatResult PcmWireFormatter::format(
     return {sample_count * 4U, true};
 }
 
+PcmFormatResult PcmWireFormatter::format_android_pcm(
+        const uint8_t *input,
+        std::size_t input_bytes,
+        int android_encoding,
+        double gain,
+        uint8_t *output,
+        std::size_t output_capacity) const noexcept
+{
+    // Stable android.media.AudioFormat PCM constants; DSD uses its own branch.
+    switch (android_encoding) {
+        case 2:
+            return format(input, input_bytes, PcmSourceEncoding::S16Le,
+                          gain, output, output_capacity);
+        case 22:
+            return format(input, input_bytes, PcmSourceEncoding::S32Le,
+                          gain, output, output_capacity);
+        case 4:
+            return format_float32(input, input_bytes, gain, output, output_capacity);
+        default:
+            return {};
+    }
+}
+
 PcmFormatResult PcmWireFormatter::format_float32(
         const uint8_t *input,
         std::size_t input_bytes,
@@ -109,9 +132,10 @@ PcmFormatResult PcmWireFormatter::format_float32(
         const double normalized = std::isfinite(decoded)
             ? std::clamp(static_cast<double>(decoded) * gain, -1.0, 1.0)
             : 0.0;
-        const double scaled = normalized >= 0.0
-            ? normalized * static_cast<double>(kInt32Max)
-            : normalized * -static_cast<double>(kInt32Min);
+        // PCM uses a symmetric 2^31 scale. Multiplying positive values by
+        // INT32_MAX introduces a one-LSB error even for exactly representable
+        // samples such as 0.75. quantize_to_valid_bits clamps +1.0 to INT32_MAX.
+        const double scaled = normalized * 2147483648.0;
         write_s32le(
                 output + index * 4U,
                 quantize_to_valid_bits(std::llround(scaled)));

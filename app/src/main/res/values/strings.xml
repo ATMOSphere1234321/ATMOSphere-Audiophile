@@ -233,6 +233,13 @@
     <string name="settings_clear_queue_on_exit_description">Keep only the current track when you remove the app from Recents.</string>
     <string name="settings_section_smart_effects">Audio Effects</string>
     <string name="settings_section_usb_settings">USB Audio Settings</string>
+    <string name="settings_android_usb_audio_title">Android bit-perfect</string>
+    <string name="settings_android_usb_bit_perfect_description">In Audiophile Mode, request the Android bit-perfect mixer. Off uses the ordinary Android mixer with the same decoder and PCM format.</string>
+    <string name="settings_android_usb_audio_legacy_title">Android USB audio</string>
+    <string name="settings_android_usb_audio_legacy_on">Send the original PCM format through Android in Audiophile Mode. USB access permission is not needed. Exact output depends on the system audio settings.</string>
+    <string name="settings_android_usb_audio_on">Use Android USB bit-perfect output in Audiophile Mode, regardless of USB access permission. Playback stops if the USB format is unsupported.</string>
+    <string name="settings_android_usb_audio_off">Use the player\'s own USB driver. USB access permission is required.</string>
+    <string name="settings_android_usb_audio_device">Android USB output selected. Direct USB access permission is not needed.</string>
     <string name="settings_section_about">About</string>
     <string name="settings_audiophile_mode_title">Audiophile Mode</string>
     <string name="settings_audiophile_mode_enabled_description">Uses Audiophile\'s internal playback engine instead of Android\'s standard engine. When a USB DAC is connected, Android is bypassed completely and the unaltered, bit-perfect signal is sent directly to the DAC.</string>

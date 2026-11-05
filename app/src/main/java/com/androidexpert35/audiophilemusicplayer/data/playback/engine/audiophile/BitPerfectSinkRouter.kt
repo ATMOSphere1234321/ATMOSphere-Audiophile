@@ -47,7 +47,8 @@ internal class BitPerfectSinkRouter @Inject constructor(
      * libusb ISO transport through the enhanced sink.
      */
     fun isLibusbOutputActive(): Boolean =
-        usbAudioSinkFactory.currentUsbDeviceState().isLibusbReady
+        !usbAudioSinkFactory.usesAndroidUsbAudio() &&
+            usbAudioSinkFactory.currentUsbDeviceState().isLibusbReady
 
     /**
      * Resolves the bit-perfect DSD transport context (native DSD or DoP) for
@@ -61,6 +62,7 @@ internal class BitPerfectSinkRouter @Inject constructor(
      * @return A [DsdPlaybackContext] describing the negotiated transport, or `null`.
      */
     fun buildDsdPlaybackContext(format: AudioFormatInfo): DsdPlaybackContext? {
+        if (usbAudioSinkFactory.usesAndroidUsbAudio()) return buildDopOnlyPlaybackContext(format)
         val sourceRate = format.dsdRate ?: return null
 
         val outputMode = dsdCapabilityDetector.resolvePlaybackMode(
@@ -211,7 +213,7 @@ internal class BitPerfectSinkRouter @Inject constructor(
                     "isLibusbReady=${state.isLibusbReady} sourcePath=${sourcePath != null} " +
                     "sueActive=${sueStage?.isActive == true}"
             )
-            if (sourcePath != null && state.isLibusbReady) {
+            if (sourcePath != null && isLibusbOutputActive()) {
                 if (sueStage?.isActive == true) {
                     // DSP active: Kotlin write loop feeds ring via nativeWriteToRingBuffer.
                     Log.i(
@@ -244,7 +246,7 @@ internal class BitPerfectSinkRouter @Inject constructor(
             )
             when (ctx.outputMode) {
                 is DsdOutputMode.NativeDsd -> {
-                    if (sourcePath != null && state.isLibusbReady) {
+                    if (sourcePath != null && isLibusbOutputActive()) {
                         // Always use the libusb isochronous engine for USB DSD.
                         // The C++ DsdPlaybackManager monitors ISO transfer STATUS bits and
                         // auto-switches from native DSD to DoP within 200 ms if the DAC
@@ -269,7 +271,7 @@ internal class BitPerfectSinkRouter @Inject constructor(
                 }
 
                 is DsdOutputMode.DoP -> {
-                    if (sourcePath != null && state.isLibusbReady) {
+                    if (sourcePath != null && isLibusbOutputActive()) {
                         // For DoP over libusb: createLibusbDsdSink starts the C++ DsdPlaybackManager
                         // in native-DSD mode. The manager detects STALL and auto-switches to DoP —
                         // so this sink correctly handles both DoP-only and native-then-DoP DACs.

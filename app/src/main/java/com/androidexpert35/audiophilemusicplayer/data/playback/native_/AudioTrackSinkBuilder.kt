@@ -9,13 +9,11 @@ import android.media.AudioTrack
 import android.util.Log
 
 /**
- * Builds an [AudioTrack] for audiophile playback using a three-rung fallback chain.
+ * Builds an [AudioTrack] for audiophile playback using a two-rung fallback chain.
  *
  * 1. **Attempt 1** — `FLAG_DIRECT` + native encoding (source bit-depth, source sample
  *    rate). This is the only truly bit-transparent option.
- * 2. **Attempt 2** — `FLAG_DIRECT` + `PCM_FLOAT`. Retries the direct path at float
- *    encoding for decoders whose native integer format the HAL refused.
- * 3. **Attempt 3** — Standard mixer path at the native encoding. Bit-perfect is no
+ * 2. **Attempt 2** — Standard mixer path at the native encoding. Bit-perfect is no
  *    longer guaranteed but volume processing remains under our control.
  *    **Skipped when [requireDirectOutput] is `true`** — callers transporting a
  *    fragile DSD-over-PCM (DoP) bitstream must pass `true` here so the engine
@@ -26,8 +24,8 @@ import android.util.Log
  * @param format Decoded audio format produced by [FFmpegDecoder].
  * @param bufferMultiplier Multiplier applied to `AudioTrack.getMinBufferSize()`.
  * @param attributes Audio attributes describing the playback use-case.
- * @param requireDirectOutput When `true`, the standard-mixer fallback (Attempt 3)
- *   is suppressed. If Attempts 1 and 2 both fail, the function throws
+ * @param requireDirectOutput When `true`, the standard-mixer fallback (Attempt 2)
+ *   is suppressed. If the direct attempt fails, the function throws
  *   [IllegalStateException] so the caller can degrade to an alternative path.
  * @return A pair of the constructed [AudioTrack] and its [PipelinePathReport].
  * @throws IllegalStateException when all eligible rungs fail to produce an initialized
@@ -62,36 +60,14 @@ internal fun buildAudioTrackWithFallback(
         )
     }
 
-    // Attempt 2 — FLAG_DIRECT + PCM_FLOAT (integer decoders the HAL refused).
-    // Skipped when requireDirectOutput=true: for DoP transports the encoding must
-    // match exactly what the DoPEncoder produces (PCM_24BIT_PACKED). Writing
-    // PCM_24BIT_PACKED frames into a PCM_FLOAT AudioTrack misaligns sample
-    // boundaries (6 bytes/frame vs 8 bytes/frame stereo) and corrupts the output.
-    if (!requireDirectOutput && format.androidPcmEncoding != AudioFormat.ENCODING_PCM_FLOAT) {
-        tryBuildAudioTrack(
-            encoding = AudioFormat.ENCODING_PCM_FLOAT,
-            sampleRateHz = format.sampleRateHz,
-            channelMask = channelMask,
-            bufferMultiplier = bufferMultiplier,
-            attributes = attributes,
-            useDirectFlag = true,
-        )?.let { (track, bufferFrames) ->
-            Log.w(TAG, "FLAG_DIRECT accepted only at PCM_FLOAT — telemetry will show fallback")
-            return track to buildAudioTrackPathReport(
-                track = track, format = format, encoding = AudioFormat.ENCODING_PCM_FLOAT,
-                channelMask = channelMask, bufferFrames = bufferFrames,
-                nativeRate = nativeRate, framesPerBuffer = framesPerBuffer,
-                usedDirectFlag = true, usedFloatFallback = true,
-            )
-        }
-    }
-
-    // Attempt 3 — standard mixer path. Last resort; bit-perfect no longer guaranteed.
+    // Never retry integer bytes as PCM_FLOAT: the sink writes decoder bytes
+    // unchanged and no integer-to-float conversion exists on this fallback path.
+    // Attempt 2 — standard mixer path. Last resort; bit-perfect no longer guaranteed.
     // Skipped when requireDirectOutput=true (DoP or other streams that must not pass
     // through the software mixer — routing them here would corrupt the signal).
     if (requireDirectOutput) {
         error(
-            "FLAG_DIRECT required but all direct rungs refused at " +
+            "FLAG_DIRECT required but the native direct carrier was refused at " +
                 "${format.sampleRateHz} Hz ${format.channelCount}ch " +
                 "encoding=${format.androidPcmEncoding}. Cannot route DoP through the mixer."
         )
@@ -107,7 +83,7 @@ internal fun buildAudioTrackWithFallback(
         "AudioTrack could not be built for ${format.sampleRateHz}Hz " +
             "${format.channelCount}ch encoding=${format.androidPcmEncoding}"
     )
-    Log.w(TAG, "All FLAG_DIRECT rungs refused — falling through to standard mixer path")
+    Log.w(TAG, "FLAG_DIRECT refused at the native encoding — falling through to standard mixer path")
     return track to buildAudioTrackPathReport(
         track = track, format = format, encoding = format.androidPcmEncoding,
         channelMask = channelMask, bufferFrames = bufferFrames,
@@ -157,8 +133,10 @@ internal fun tryBuildAudioTrack(
             .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_NONE)
             .setTransferMode(AudioTrack.MODE_STREAM)
 
-        if (useDirectFlag) {
-            applyDirectOutputFlag(builder)
+        if (useDirectFlag && !applyDirectOutputFlag(builder)) {
+            // Do not report an ordinary mixed AudioTrack as a direct output.
+            // The caller can explicitly take its normal-mixer fallback instead.
+            return@runCatching null
         }
 
         val track = builder.build()
@@ -189,14 +167,14 @@ internal fun tryBuildAudioTrack(
  *
  * @param builder The [AudioTrack.Builder] to patch.
  */
-internal fun applyDirectOutputFlag(builder: AudioTrack.Builder) {
+internal fun applyDirectOutputFlag(builder: AudioTrack.Builder): Boolean =
     runCatching {
         val method = AudioTrack.Builder::class.java.getMethod("setFlags", Int::class.javaPrimitiveType)
         method.invoke(builder, AUDIO_OUTPUT_FLAG_DIRECT)
+        true
     }.onFailure { t ->
-        Log.d(TAG, "setFlags reflection failed (hidden-API policy?): ${t.message}")
-    }
-}
+        Log.d(TAG, "Direct-output request unavailable: ${t.message}")
+    }.getOrDefault(false)
 
 /**
  * Builds a [PipelinePathReport] from a successfully constructed [AudioTrack]

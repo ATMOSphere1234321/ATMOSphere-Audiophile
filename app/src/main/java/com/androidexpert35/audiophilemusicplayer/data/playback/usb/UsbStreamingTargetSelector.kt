@@ -391,7 +391,9 @@ internal object UsbStreamingTargetSelector {
         candidate: UsbStreamingTarget,
     ): Boolean {
         val claimed = runCatching {
-            connection.claimInterface(candidate.usbInterface, true)
+            // A capability probe must not detach Android's USB audio driver.
+            // libusb owns detach/reattach only when direct output is actually opened.
+            connection.claimInterface(candidate.usbInterface, false)
         }.onFailure { throwable ->
             Log.w(
                 TAG,

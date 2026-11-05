@@ -20,7 +20,7 @@ negotiated — check `usedDirectFlag` and compare `sampleRateHz` against
 
 Some OEM ROMs (ColorOS, OneUI, select Xiaomi skins) silently strip the direct
 flag during `AudioTrack.Builder.build()` unless the caller is signed with the
-platform key. The three-rung fallback chain in `AudioTrackSink` is mandatory
+platform key. The encoding-preserving fallback chain in `AudioTrackSink` is mandatory
 to keep audio flowing; the telemetry UI is the only way a user can tell they
 are no longer on the direct path.
 
@@ -29,7 +29,7 @@ truly bypasses the Flinger mixer — and even then, the HAL downstream of it
 may still resample. We apply this preference automatically via
 `UsbBitPerfectRouter`; the bit-perfect telemetry badge (`isBitPerfect=true`)
 is `true` only when **either** the Android 14+ mixer preference was confirmed
-by the router callback, **or** the custom USB host `UsbAudioSink` is active
+by the router callback and matches the active device/PCM carrier, **or** the custom USB host `UsbAudioSink` is active
 (raw UAC2 isochronous path, bypasses AudioFlinger entirely).
 
 Direct USB transport does not by itself make processed audio bit-perfect. When SUE,
@@ -120,6 +120,16 @@ therefore deliberately **routes 24-bit sources through
 `ENCODING_PCM_32BIT`** (zero-padded in the low byte). This is lossless and
 sample-perfect; the HAL sees a stream it understands universally.
 
+Floating PCM WAV keeps its floating decoder carrier even when FFmpeg omits raw
+bit-depth metadata. PCM_F64 is reduced to F32 and is not bit-exact. Android
+negotiation requests PCM_FLOAT for floating bytes, while
+24/32-bit integer decoder output requests PCM_32BIT. If direct output refuses an
+integer carrier, the fallback keeps that encoding; it never writes integer bits into
+a float AudioTrack. The shared Android mixer can still process fallback audio.
+On the custom USB integer carrier, only floats representable at the endpoint's
+precision can retain exact sample values; conversion uses symmetric scaling without
+peak normalization.
+
 ## 6. Offload is deliberately abandoned
 
 The old ExoPlayer pipeline depended on DSP offload for power savings but was
@@ -192,3 +202,12 @@ security patches. The `prebuilt/` tree is explicitly excluded from the
 version-controlled source; CI should rebuild from pinned FFmpeg sources on
 every release build. See `app/src/main/cpp/prebuilt/README.md` for the
 recommended audio-only configuration.
+
+### USB cadence validation
+
+A correct nominal sample rate also requires matching the endpoint service
+interval. The native pool schedules with actual USB speed and `bInterval`,
+including fractional audio-frame counts. It rejects unknown cadence or
+insufficient endpoint capacity. Ordinary SuperSpeed companions are supported;
+extended SSP isochronous companion encodings are rejected until separately
+implemented and verified. Host packet tests do not establish live DAC behavior.
