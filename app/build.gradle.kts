@@ -33,12 +33,12 @@ android {
         targetSdk = 36
 
         // ── Versioning (single source of truth) ──
-        // Bump these three values for each release; versionCode is derived automatically.
+        // Keep the upstream release name and a monotonic ATMOSphere version code.
         val major = 1
         val minor = 1
         val patch = 8
-        versionCode = major * 10000 + minor * 100 + patch   // e.g. 1.2.3 → 10203
-        versionName = "$major.$minor.$patch RC"
+        versionCode = 10114 // Updates the installed ATMOSphere build (10113).
+        versionName = "$major.$minor.$patch RC-atmosphere.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
