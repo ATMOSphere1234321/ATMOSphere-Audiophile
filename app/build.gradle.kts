@@ -7,6 +7,8 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+val atmosphereBuild = providers.gradleProperty("atmosphere").isPresent
+
 // ── Load signing credentials from local.properties ────────────────────────────
 // local.properties is git-ignored; never hard-code credentials in this file.
 val localProps = Properties().apply {
@@ -21,6 +23,7 @@ val releaseKeyPassword: String = localProps.getProperty("RELEASE_KEY_PASSWORD", 
 
 android {
     namespace = "com.androidexpert35.audiophilemusicplayer"
+    ndkVersion = "29.0.14206865"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
@@ -44,7 +47,7 @@ android {
 
         // Bit-perfect native audio pipeline: FFmpeg JNI decoder + AudioTrack sink.
         ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            abiFilters += if (atmosphereBuild) listOf("arm64-v8a") else listOf("arm64-v8a", "x86_64")
         }
 
         externalNativeBuild {
@@ -101,7 +104,8 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("release")
+            // The firmware helper signs with the platform key after Gradle assembles the APK.
+            signingConfig = if (atmosphereBuild) null else signingConfigs.getByName("release")
         }
     }
     compileOptions {
@@ -116,7 +120,7 @@ android {
 
 dependencies {
     // Shared presentation primitives: UI state, BaseViewModel, navigation, and screen scaffolds.
-    implementation(libs.coreui)
+    implementation(project(":coreui"))
 
     // Core Android
     implementation(libs.androidx.core.ktx)

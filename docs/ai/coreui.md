@@ -36,9 +36,9 @@ Library baseline:
 | Compose BOM | 2026.03.01 |
 | Mandatory DI framework | None |
 
-Audiophile consumes the library from GitHub Packages. Repository credentials must stay
-in a user-level Gradle properties file or the git-ignored project
-`local.properties`; never commit them.
+Audiophile builds CoreUI 1.0.5 from the pinned `third_party/coreui` submodule as
+`:coreui`, sharing the app's Gradle plugin and dependency versions. Initialise it
+with `git submodule update --init --recursive`; no GitHub Packages token is needed.
 
 ---
 
