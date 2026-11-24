@@ -594,12 +594,34 @@ Java_com_androidexpert35_audiophilemusicplayer_data_playback_usb_UsbAudioBridge_
     ULOGI("nativeClaimInterface: iface=%d alt=%d ep=0x%02X effective=%u bytes/µframe",
           interfaceNumber, altSetting, endpointAddress, effectiveBytesPerUframe);
 
+    // Detach Audio Control first: it shuts down ALSA before we change streaming
+    // endpoints, otherwise snd_usb_pcm_close() can race our SET_INTERFACE.
+    int control_interface = -1;
+    uac2_find_clock_source_id(ctx->device_handle, &control_interface);
+    if (control_interface < 0) {
+        return static_cast<jint>(UsbControlStatus::ClaimInterfaceNotFound);
+    }
+    const int auto_detach = libusb_set_auto_detach_kernel_driver(ctx->device_handle, 1);
+    if (auto_detach != LIBUSB_SUCCESS && auto_detach != LIBUSB_ERROR_NOT_SUPPORTED) {
+        ULOGE("nativeClaimInterface: auto-detach failed: %s", libusb_error_name(auto_detach));
+        return static_cast<jint>(UsbControlStatus::AutoDetachUnexpectedError);
+    }
+    const int control_claim = libusb_claim_interface(ctx->device_handle, control_interface);
+    if (control_claim != LIBUSB_SUCCESS) {
+        ULOGE("nativeClaimInterface: control iface=%d claim failed: %s",
+              control_interface, libusb_error_name(control_claim));
+        return static_cast<jint>(UsbControlStatus::ClaimUnexpectedError);
+    }
+    ctx->ctrl_interface_number = control_interface;
+    ULOGI("nativeClaimInterface: control iface=%d claimed before streaming iface=%d",
+          control_interface, interfaceNumber);
+
     // Use the Phase 1+2-only variant so the alternate setting is NOT activated
     // yet.  The correct order required by FiiO KA series (and XMOS/Savitech
     // chips in general) is:
     //
-    //   nativeClaimInterface()           ← claim streaming iface (NO alt-setting)
-    //   nativeSetUac2ClockSampleRate()   ← claim ctrl iface 0 + SET_CUR clock
+    //   nativeClaimInterface()           ← claim control, then streaming (NO alt-setting)
+    //   nativeSetUac2ClockSampleRate()   ← SET_CUR clock
     //   nativeActivateAltSetting()       ← libusb_set_interface_alt_setting
     //   nativeAllocateTransferPool()
     //   nativeAttachUsbEngine()          ← ring pre-fill + submit transfers
@@ -635,7 +657,7 @@ Java_com_androidexpert35_audiophilemusicplayer_data_playback_usb_UsbAudioBridge_
  * nativeSetUac2ClockSampleRate — program the UAC2 clock source frequency.
  *
  * Must be called AFTER nativeClaimInterface() returns 0 (the device handle is
- * in a claimed, alt-setting-active state) and BEFORE nativeAllocateTransferPool().
+ * in a claimed, alt-setting-inactive state) and BEFORE nativeAllocateTransferPool().
  *
  * ### Why this call is required
  *
@@ -736,42 +758,10 @@ Java_com_androidexpert35_audiophilemusicplayer_data_playback_usb_UsbAudioBridge_
           static_cast<int>(control_interface_number),
           detected_ac_iface);
 
-    // ── Claim Audio Control interface before the control transfer ─────────────
-    //
-    // Android's libusb backend requires the process to have explicitly claimed
-    // an interface before it can send class-specific control requests targeting
-    // that interface in wIndex.  The Audio Control interface is separate from
-    // the AudioStreaming interface claimed in nativeClaimInterface().
-    //
-    // Without this claim, libusb_control_transfer returns LIBUSB_ERROR_PIPE
-    // because the kernel rejects the request — the host enforces exclusive USB
-    // interface ownership and won't route a control transfer to an interface
-    // owned by nobody (or by the kernel UAC2 driver).
-    //
-    // Failure is logged but non-fatal: some Android kernels auto-claim interface
-    // 0 on behalf of the app, or the control transfer may still succeed on
-    // lenient firmware.  We proceed regardless so the probing loop can
-    // determine empirically whether the transfer works.
-    {
-        const int ctrl_claim_ret = libusb_claim_interface(ctx->device_handle, ctrl_iface);
-        if (ctrl_claim_ret == LIBUSB_SUCCESS) {
-            ULOGI("nativeSetUac2ClockSampleRate: ctrl interface %d claimed OK — "
-                  "control transfers to this interface are now enabled",
-                  ctrl_iface);
-            ctx->ctrl_interface_number = ctrl_iface;   // saved for teardown
-        } else if (ctrl_claim_ret == LIBUSB_ERROR_BUSY) {
-            // Interface 0 is often auto-claimed by the kernel UAC2 driver.
-            // On Android this means the kernel holds a soft reference; the
-            // control transfer may still succeed because EP0 is shared.
-            ULOGW("nativeSetUac2ClockSampleRate: ctrl interface %d BUSY "
-                  "(kernel may own it — control transfer may still succeed "
-                  "via EP0 which is always accessible)",
-                  ctrl_iface);
-        } else {
-            ULOGW("nativeSetUac2ClockSampleRate: libusb_claim_interface(ctrl=%d) "
-                  "returned %s (%d) — continuing; transfer may still succeed",
-                  ctrl_iface, libusb_error_name(ctrl_claim_ret), ctrl_claim_ret);
-        }
+    if (ctx->ctrl_interface_number != ctrl_iface) {
+        ULOGE("nativeSetUac2ClockSampleRate: control iface=%d was not claimed before streaming",
+              ctrl_iface);
+        return LIBUSB_ERROR_BUSY;
     }
 
     // Program the clock through the descriptor-driven helper: parsed bClockID
